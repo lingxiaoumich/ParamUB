@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — User Guide</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">User guide</div>
+  <h1>ParamUB</h1>
+  <p class="subtitle">
+    Parametric car underbody generator built on CadQuery. One dataclass in,
+    STL + preview out.
+  </p>
+</header>
+
+<h2>Install</h2>
+<pre><code>conda activate paramub        # provides cadquery, pyvista, trimesh, matplotlib
+</code></pre>
+
+<h2>Quick start</h2>
+<pre><code>from paramub import generate, UnderbodySpec
+
+generate(
+    UnderbodySpec(),              # defaults: 2.7 m wheelbase, 225/45 R18, etc.
+    output_dir="outputs/demo",
+    stem="ub",
+    output_mode="all",            # "stl"  -> just ub.stl
+                                  # "all"  -> ub.stl + ub_preview.png + ub.log + ub.json
+    output_parts=True,            # also emit FLOOR.STL + WHEEL_FL/FR/RL/RR.STL
+    export_step=True,             # also emit ub.step  (+ part STEPs when output_parts)
+)
+</code></pre>
+
+<h2>Outputs</h2>
+<table>
+  <thead><tr><th>File</th><th>When</th><th>Contents</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;stem&gt;.stl</code></td><td>always</td>
+        <td>Merged assembly (floor + wheelhouses + 4 wheels).</td></tr>
+    <tr><td><code>&lt;stem&gt;_preview.png</code></td><td><code>output_mode="all"</code></td>
+        <td>8-panel composite: iso, top, front elevation, Y=0 section, front+rear axle sections, front+rear tire details, plus parameter footer.</td></tr>
+    <tr><td><code>&lt;stem&gt;.log</code></td><td><code>output_mode="all"</code></td>
+        <td>Mirrored stdout/stderr.</td></tr>
+    <tr><td><code>&lt;stem&gt;.json</code></td><td><code>output_mode="all"</code></td>
+        <td>Full spec tree as JSON.</td></tr>
+    <tr><td><code>FLOOR.STL</code>, <code>WHEEL_FL.STL</code>, <code>WHEEL_FR.STL</code>, <code>WHEEL_RL.STL</code>, <code>WHEEL_RR.STL</code></td>
+        <td><code>output_parts=True</code></td>
+        <td>One STL per assembly part. Filenames are fixed UPPERCASE.</td></tr>
+    <tr><td><code>&lt;stem&gt;.step</code></td><td><code>export_step=True</code></td>
+        <td>Merged BREP STEP file with named subparts (no tessellation; opens cleanly in any CAD tool).</td></tr>
+    <tr><td><code>FLOOR.STEP</code>, <code>WHEEL_FL.STEP</code>, … <code>WHEEL_RR.STEP</code></td>
+        <td><code>export_step=True</code> + <code>output_parts=True</code></td>
+        <td>One STEP per assembly part.</td></tr>
+  </tbody>
+</table>
+
+<h2>Spec layout</h2>
+<p>One root spec composes the whole thing. Edit any subspec independently.</p>
+<pre><code>UnderbodySpec
+├── vehicle plan        wheelbase_mm, front_overhang_mm, rear_overhang_mm,
+│                       track_front_mm, track_rear_mm
+├── ride / floor        ride_height_mm, floor_width_mm, floor_thickness_mm,
+│                       floor_angle_deg
+├── diffuser            diffuser_start_x_mm (None = rear axle),
+│                       diffuser_angle_deg, diffuser_radius_mm
+├── wheelhouses         wheel_house_axial_clearance_mm,
+│                       wheel_house_lateral_clearance_mm,
+│                       front_steering_clearance_mm,
+│                       front_wheel_house_fillet_mm, rear_wheel_house_fillet_mm
+├── alignment           camber_front_deg, camber_rear_deg,
+│                       toe_front_deg, toe_rear_deg
+└── wheel: WheelSpec
+    ├── tire:  TireSpec   (section_width, aspect_ratio, rim_diameter_in,
+    │                       sidewall_bulge, shoulder_radius, tread_width,
+    │                       crown_radius, rim_flange)
+    └── spoke: SpokeSpec  (wheel_width, hub_bore, wheel_offset (ET),
+                           dish_depth, num_spokes, spoke widths, window gaps,
+                           rim_band_width, spoke_thickness, ...)
+
+# Optional: separate rear wheel
+UnderbodySpec.rear_wheel = WheelSpec(...)  # None -> reuse front wheel
+</code></pre>
+
+<h2>Common tweaks</h2>
+<pre><code>from paramub import generate, UnderbodySpec, WheelSpec, TireSpec, SpokeSpec
+
+spec = UnderbodySpec(
+    wheelbase_mm=2900,
+    ride_height_mm=80,
+    diffuser_angle_deg=10,
+    front_wheel_house_fillet_mm=150,
+    wheel=WheelSpec(
+        tire=TireSpec(section_width_mm=265, aspect_ratio=35, rim_diameter_in=20),
+        spoke=SpokeSpec(num_spokes=10, wheel_offset_mm=45),
+    ),
+)
+generate(spec, output_dir="outputs/sport", stem="sport", output_mode="all")
+</code></pre>
+
+<h2>Full parameter reference</h2>
+<p>Per-builder guides with labeled diagrams and complete parameter tables:</p>
+<ul>
+  <li><a href="tire_builder.html">tire_builder</a> — tire cross-section</li>
+  <li><a href="spoke_builder.html">spoke_builder</a> — disc, spoke windows, rim barrel</li>
+  <li><a href="wheelhouse_builder.html">wheelhouse_builder</a> — arch shape, fillets, trim</li>
+  <li><a href="floor_builder.html">floor_builder</a> — floor + diffuser geometry</li>
+</ul>
+
+<footer>ParamUB — see <code>paramub/</code> for source. Frozen prototypes live in <code>paramub/debug/</code>.</footer>
+</main>
+</body>
+</html>

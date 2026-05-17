@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Floor Builder</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Builder 5 of 6</div>
+  <h1>Floor &amp; Diffuser Builder</h1>
+  <p class="subtitle">
+    Flat underbody floor + tangent-filleted rear diffuser ramp.
+    Returns either a zero-thickness <code>Face</code> (CFD surface mode)
+    or a thin solid slab.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#section">XZ underside contour</a></li>
+    <li><a href="#plan">XY plan</a></li>
+    <li><a href="#params">Parameter reference</a></li>
+    <li><a href="#below">below-cropper helper</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#notes">Implementation notes</a></li>
+  </ul>
+</nav>
+
+<h2 id="overview">Overview</h2>
+<p>
+  The floor is built in two modes, picked by <code>floor_thickness_mm</code>:
+</p>
+<table>
+  <thead><tr><th>Value</th><th>Returns</th><th>Use for</th></tr></thead>
+  <tbody>
+    <tr><td><code>== 0</code></td><td>cq.Face</td>
+        <td>CFD/aero surface meshes (single-sided triangle mesh; mesher extrudes wall thickness).</td></tr>
+    <tr><td><code>&gt; 0</code></td><td>cq.Workplane (Solid)</td>
+        <td>Closed thin slab — directly printable / unioned with arches in solid mode.</td></tr>
+  </tbody>
+</table>
+<p>
+  Both modes draw the same underside contour in the XZ plane and sweep /
+  extrude it across the floor width.
+</p>
+
+<h2 id="section">XZ underside contour</h2>
+<div class="figure">
+  <img src="diagrams/floor_section.png" alt="Floor + diffuser XZ contour">
+  <span class="caption">
+    Underside profile at Y = 0 — flat floor → tangent fillet →
+    inclined diffuser ramp. The fillet&rsquo;s tangent points are computed
+    from <code>diffuser_radius_mm</code> and <code>diffuser_angle_deg</code>
+    so the three segments meet smoothly with no kinks. Note the Z axis is
+    not to scale with X.
+  </span>
+</div>
+
+<h2 id="plan">XY plan</h2>
+<div class="figure">
+  <img src="diagrams/floor_plan.png" alt="Floor XY plan">
+  <span class="caption">
+    Plan view of the floor — a rectangle of <code>floor_width_mm</code>
+    by <code>(floor_x_max − floor_x_min)</code>. The underbody assembler
+    cuts wheelhouse footprints (red rectangles) into this rectangle so
+    each wheel can pass through.
+  </span>
+</div>
+
+<h2 id="params">Parameter reference</h2>
+
+<h3>Plan</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>floor_x_min</code></td><td class="num">required</td><td>mm</td>
+        <td>Tail (rear) X of the floor. Computed by the underbody assembler
+            from <code>rear_axle_x − rear_overhang_mm</code>.</td></tr>
+    <tr><td><code>floor_x_max</code></td><td class="num">required</td><td>mm</td>
+        <td>Nose (front) X of the floor.
+            <code>front_axle_x + front_overhang_mm</code>.</td></tr>
+    <tr><td><code>floor_width_mm</code></td><td class="num">1800</td><td>mm</td>
+        <td>Full lateral width (extruded symmetrically about Y = 0).</td></tr>
+  </tbody>
+</table>
+
+<h3>Ride / form</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>ride_height_mm</code></td><td class="num">100</td><td>mm</td>
+        <td>Ground to floor underside (Z = 0 is ground).</td></tr>
+    <tr><td><code>floor_thickness_mm</code></td><td class="num">0</td><td>mm</td>
+        <td>0 → surface mode (Face). &gt;0 → solid slab of that thickness.</td></tr>
+  </tbody>
+</table>
+
+<h3>Diffuser</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>diffuser_start_x_mm</code></td><td class="num">None</td><td>mm</td>
+        <td>X where the floor stops being flat and the fillet begins.
+            <code>None</code> → underbody assembler substitutes
+            <code>rear_axle_x</code>.</td></tr>
+    <tr><td><code>diffuser_angle_deg</code></td><td class="num">7</td><td>°</td>
+        <td>Ramp angle (positive = floor kicks upward at the rear).</td></tr>
+    <tr><td><code>diffuser_radius_mm</code></td><td class="num">500</td><td>mm</td>
+        <td>Tangent fillet between the flat floor and the ramp.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="below">below-cropper helper</h2>
+<p>
+  <code>build_below_cropper(spec)</code> returns a solid half-space below
+  the underbody underside (extending well past the floor edges in X and
+  ±1.5 × floor_width in Y). The wheelhouse builder uses it to crop arch
+  faces so the rear arches follow the diffuser slope instead of hanging
+  out below it.
+</p>
+<div class="callout info">
+  This is shared infrastructure — the floor and wheelhouse builders agree
+  on exactly the same contour because both call <code>_diff_geometry()</code>
+  internally.
+</div>
+
+<h2 id="usage">Usage</h2>
+<pre><code>from paramub import FloorSpec, build_floor
+
+# Surface mode (zero-thickness Face)
+spec = FloorSpec(
+    floor_x_min=-2150, floor_x_max=2200,
+    diffuser_start_x_mm=-1350,
+    diffuser_angle_deg=7,
+    diffuser_radius_mm=500,
+)
+face = build_floor(spec)        # cq.Face
+
+# Solid slab mode
+spec2 = FloorSpec(
+    floor_x_min=-2150, floor_x_max=2200,
+    diffuser_start_x_mm=-1350,
+    floor_thickness_mm=4,
+)
+slab = build_floor(spec2)       # cq.Workplane wrapping a Solid
+</code></pre>
+
+<h2 id="notes">Implementation notes</h2>
+<div class="callout info">
+  <strong>True zero-thickness surface.</strong> In surface mode the floor
+  is a single ruled <code>Face</code> spanning ±floor_width / 2 in Y, with
+  wheelhouse cutouts boolean-removed by the underbody assembler. STL
+  exports cleanly as a single-sided triangle mesh — appropriate for CFD
+  meshers that extrude wall thickness themselves.
+</div>
+<div class="callout info">
+  <strong>Open-wire contour assembly.</strong> The underside contour is
+  built by hand from three <code>cq.Edge.makeLine</code> /
+  <code>makeThreePointArc</code> primitives and joined with
+  <code>cq.Wire.assembleEdges</code>. The shortcut of building a
+  <code>Workplane</code> chain and pulling <code>edges().vals()</code> only
+  returns the latest edge, not all of them — a real footgun.
+</div>
+<div class="callout">
+  <strong>Diffuser geometry equations.</strong> Given
+  <code>α = diffuser_angle</code> and <code>R = diffuser_radius</code>:
+  the fillet eats <code>R·tan(α/2)</code> off the flat portion along the
+  floor, and that same distance is consumed along the ramp.
+  Increasing R thus pushes the flat-floor end of the fillet forward and
+  the diffuser tangent point rearward.
+</div>
+
+<footer>ParamUB — auto-generated user guide. Regenerate diagrams with
+<code>python paramub/docs/_make_diagrams.py</code>.</footer>
+</main>
+</body>
+</html>

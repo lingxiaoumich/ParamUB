@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Documentation Index</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">User guides</div>
+  <h1>ParamUB — parametric wheel + underbody generator</h1>
+  <p class="subtitle">
+    Six builders compose into one car-underbody assembly. Builders 1–2
+    feed builder 3 (wheel); builders 4–5 plus four wheels feed builder 6
+    (underbody). HTML guides are provided for the four configurable
+    builders.
+  </p>
+</header>
+
+<h2>Builders</h2>
+<table>
+  <thead><tr><th>#</th><th>Module</th><th>What it builds</th><th>Guide</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>tire_builder</code></td>
+        <td>Revolved tire cross-section.</td>
+        <td><a href="tire_builder.html">tire_builder.html</a></td></tr>
+    <tr><td>2</td><td><code>spoke_builder</code></td>
+        <td>Curved disc, spoke window cuts, hollow rim barrel.</td>
+        <td><a href="spoke_builder.html">spoke_builder.html</a></td></tr>
+    <tr><td>3</td><td><code>wheel_assem</code></td>
+        <td>Unions 1 + 2 into a single wheel solid.</td>
+        <td>—</td></tr>
+    <tr><td>4</td><td><code>wheelhouse_builder</code></td>
+        <td>One arch solid per wheel; outer faces extracted later.</td>
+        <td><a href="wheelhouse_builder.html">wheelhouse_builder.html</a></td></tr>
+    <tr><td>5</td><td><code>floor_builder</code></td>
+        <td>Floor + tangent-filleted diffuser (Face or Solid).</td>
+        <td><a href="floor_builder.html">floor_builder.html</a></td></tr>
+    <tr><td>6</td><td><code>ub_assem</code></td>
+        <td>Composes 4 + 5 + 4× placed wheels into the underbody Assembly.</td>
+        <td>—</td></tr>
+  </tbody>
+</table>
+
+<h2>Unified entry — <code>generate</code></h2>
+<p>
+  A single function takes one combined spec and writes either an STL
+  file or a full bundle (STL + 5-view PNGs + composite preview + log +
+  parameter JSON):
+</p>
+<pre><code>from paramub import generate, UnderbodySpec
+
+# Just the STL
+generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="stl")
+
+# Full bundle: STL + view PNGs + composite preview + log + spec.json
+generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
+</code></pre>
+<div class="callout info">
+  The renderer runs in a subprocess (PyVista / OCP llvmpipe conflict).
+  See <code>paramub/_render_views.py</code>.
+</div>
+
+<h2>Layout</h2>
+<pre><code>paramub/
+├── tire_builder.py            # 1 — TireSpec, build_tire
+├── spoke_builder.py           # 2 — SpokeSpec, build_spoke_disc, cut_spoke_windows, build_rim_barrel
+├── wheel_assem.py             # 3 — WheelSpec, assemble_wheel
+├── wheelhouse_builder.py      # 4 — WheelhouseSpec, build_wheelhouse_solid, extract_wheelhouse_surfaces
+├── floor_builder.py           # 5 — FloorSpec, build_floor, build_below_cropper
+├── ub_assem.py                # 6 — UnderbodySpec, build_underbody
+├── generate.py                # generate(spec, output_mode)
+├── _render_views.py           # PyVista subprocess renderer (no CadQuery imports)
+├── docs/                      # ← you are here
+│   ├── index.html
+│   ├── tire_builder.html
+│   ├── spoke_builder.html
+│   ├── wheelhouse_builder.html
+│   ├── floor_builder.html
+│   ├── _style.css
+│   ├── _make_diagrams.py
+│   └── diagrams/*.png
+└── debug/                     # frozen prototypes (monolithic earlier versions)
+</code></pre>
+
+<footer>ParamUB — auto-generated documentation.</footer>
+</main>
+</body>
+</html>

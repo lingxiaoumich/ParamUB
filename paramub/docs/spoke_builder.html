@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Spoke Builder</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Builder 2 of 6</div>
+  <h1>Spoke / Wheel-Disc Builder</h1>
+  <p class="subtitle">
+    Curved wheel disc (hub + spoke section + crowned OD cap), spoke window
+    cutouts, and a hollow C-channel rim barrel. All three live in the same
+    coordinate frame so they can be unioned directly by the
+    <a href="../wheel_assem.py">wheel assembler</a>.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#disc">Disc cross-section</a></li>
+    <li><a href="#windows">Spoke windows (plan view)</a></li>
+    <li><a href="#params">Parameter reference</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#notes">Implementation notes</a></li>
+  </ul>
+</nav>
+
+<h2 id="overview">Overview</h2>
+<p>This builder exposes three independent functions:</p>
+<table>
+  <thead><tr><th>Function</th><th>Returns</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>build_spoke_disc(spec)</code></td><td>Workplane (Solid)</td>
+        <td>Revolved disc: thick hub, asymmetric curved spoke section, crowned OD cap.</td></tr>
+    <tr><td><code>cut_spoke_windows(disc, spec)</code></td><td>Workplane</td>
+        <td>Punches <code>num_spokes</code> windows through the disc, leaving spokes between them.</td></tr>
+    <tr><td><code>build_rim_barrel(spec)</code></td><td>Workplane (Solid)</td>
+        <td>Hollow C-channel rim with flanges at each end and bead seats between.</td></tr>
+  </tbody>
+</table>
+<p>
+  All three are driven by a single
+  <a href="../spoke_builder.py"><code>SpokeSpec</code></a>. The wheel
+  assembler builds them, unions them, and unions in the tire on top.
+</p>
+
+<h2 id="disc">Disc — axial cross-section</h2>
+<div class="figure">
+  <img src="diagrams/spoke_section.png" alt="Spoke / wheel-disc cross-section">
+  <span class="caption">
+    Axial (Z–R) cross-section through the wheel disc at the defaults.
+    Outboard is +Z; the disc is asymmetric (biased outboard) like a real
+    positive-ET wheel.
+  </span>
+</div>
+
+<h2 id="windows">Spoke windows — plan view</h2>
+<div class="figure">
+  <img src="diagrams/spoke_window.png" alt="Spoke windows in plan view">
+  <span class="caption">
+    Plan view looking along the spin axis. Window inner arcs sit
+    <code>window_inner_gap_mm</code> outside the hub ring; window outer
+    arcs sit <code>window_outer_gap_mm</code> inside the rim ID. Each
+    window&rsquo;s corners are rounded with a 2D fillet.
+  </span>
+</div>
+
+<h2 id="params">Parameter reference</h2>
+
+<h3>Rim &amp; wheel body</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>wheel_width_mm</code></td><td class="num">215</td><td>mm</td>
+        <td>Full axial width (flange-tip to flange-tip). Sets the bead axial position.</td></tr>
+    <tr><td><code>rim_diameter_in</code></td><td class="num">18</td><td>in</td>
+        <td>Bead-seat diameter (kept in sync with the tire&rsquo;s value).</td></tr>
+    <tr><td><code>rim_flange_mm</code></td><td class="num">18</td><td>mm</td>
+        <td>Radial height of the flange tip above the rim radius.</td></tr>
+    <tr><td><code>hub_bore_mm</code></td><td class="num">72</td><td>mm</td>
+        <td>Diameter of the central hub bore.</td></tr>
+    <tr><td><code>wheel_offset_mm</code></td><td class="num">35</td><td>mm</td>
+        <td>ET — axial position of the mounting face from the midplane. Positive = mounting face outboard.</td></tr>
+  </tbody>
+</table>
+
+<h3>Outboard &ldquo;dish&rdquo; face</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>dish_depth_mm</code></td><td class="num">15</td><td>mm</td>
+        <td>Axial sag of the outboard face vs. the rim attach plane. 0 = flat dish.</td></tr>
+    <tr><td><code>dish_profile</code></td><td class="num">&ldquo;spherical&rdquo;</td><td>—</td>
+        <td>Spoke side profile — <code>spherical</code> (smooth Bezier) or <code>conical</code> (straight).</td></tr>
+  </tbody>
+</table>
+
+<h3>Spoke window cutouts</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>num_spokes</code></td><td class="num">7</td><td>—</td>
+        <td>Number of spokes (= number of windows). Must be ≥ 3.</td></tr>
+    <tr><td><code>spoke_width_hub_mm</code></td><td class="num">28</td><td>mm</td>
+        <td>Chord width of each spoke at its inner (hub) end.</td></tr>
+    <tr><td><code>spoke_width_rim_mm</code></td><td class="num">18</td><td>mm</td>
+        <td>Chord width of each spoke at its outer (rim) end.</td></tr>
+    <tr><td><code>window_inner_gap_mm</code></td><td class="num">12</td><td>mm</td>
+        <td>Radial gap between hub OD and the window&rsquo;s inner arc.</td></tr>
+    <tr><td><code>window_outer_gap_mm</code></td><td class="num">15</td><td>mm</td>
+        <td>Radial gap between rim ID and the window&rsquo;s outer arc.</td></tr>
+    <tr><td><code>window_corner_radius_mm</code></td><td class="num">10</td><td>mm</td>
+        <td>2D fillet radius on each window corner. Set 0 to disable.</td></tr>
+  </tbody>
+</table>
+
+<h3>Construction (rim &amp; disc thickness)</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>rim_band_width_mm</code></td><td class="num">20</td><td>mm</td>
+        <td>Radial wall thickness of the rim band. Also sets the disc OD via <code>rim_radius − rim_band_width + 0.5</code>.</td></tr>
+    <tr><td><code>flange_axial_thickness_mm</code></td><td class="num">12</td><td>mm</td>
+        <td>Axial thickness of each flange &ldquo;lip&rdquo; at the rim ends.</td></tr>
+    <tr><td><code>spoke_thickness_mm</code></td><td class="num">150</td><td>mm</td>
+        <td>Axial thickness of the disc at its OD. The disc tapers thicker toward the hub.</td></tr>
+    <tr><td><code>spoke_outer_crown_mm</code></td><td class="num">4</td><td>mm</td>
+        <td>Radial crown height on the OD cap (the cap bows outward by this much).</td></tr>
+  </tbody>
+</table>
+
+<h2 id="usage">Usage</h2>
+<pre><code>from paramub import SpokeSpec, build_spoke_disc, cut_spoke_windows, build_rim_barrel
+
+spec = SpokeSpec(num_spokes=10, spoke_width_hub_mm=20)
+disc = cut_spoke_windows(build_spoke_disc(spec), spec)
+rim  = build_rim_barrel(spec)
+wheel = disc.union(rim)
+</code></pre>
+
+<h2 id="notes">Implementation notes</h2>
+<div class="callout info">
+  <strong>0.5 mm rim overlap.</strong> The disc&rsquo;s OD is built at
+  <code>rim_radius − rim_band_width + 0.5</code> so the union with the rim
+  barrel closes cleanly. Without the overlap the two surfaces would be
+  exactly tangent and the STL tessellation could leave a hairline gap.
+</div>
+<div class="callout info">
+  <strong>C1 continuity at the OD cap.</strong> Both ends of the cap carry
+  a radial tangent (+R at the inboard end, −R at the outboard end), so the
+  cap blends smoothly into the inboard and outboard spoke surfaces — no
+  visible step in the cross-section.
+</div>
+<div class="callout">
+  <strong>Window fillet fallback.</strong> If the requested
+  <code>window_corner_radius_mm</code> is too large for the chosen window
+  geometry, <code>cut_spoke_windows</code> retries with a scaled-down
+  radius (1.0 → 0.85 → 0.7 → …) and only falls back to sharp corners if
+  every attempt fails.
+</div>
+
+<footer>ParamUB — auto-generated user guide. Regenerate diagrams with
+<code>python paramub/docs/_make_diagrams.py</code>.</footer>
+</main>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Tire Builder</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Builder 1 of 6</div>
+  <h1>Tire Builder</h1>
+  <p class="subtitle">
+    Revolved-cross-section tire with a C1 tangent shoulder rounding into a
+    tread crown arc. Emits a single solid centered on Z = 0 with its spin
+    axis along Z.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#dimensions">Cross-section &amp; dimensions</a></li>
+    <li><a href="#params">Parameter reference</a></li>
+    <li><a href="#derived">Derived values</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#notes">Implementation notes</a></li>
+  </ul>
+</nav>
+
+<h2 id="overview">Overview</h2>
+<p>
+  <code>paramub.tire_builder.build_tire(spec, z_bead_mm)</code> builds the
+  outer rubber tire. The 2D radial cross-section is revolved 360° about the
+  spin axis. The sidewall is a single cubic Bezier from the bead to the
+  tread edge; its end tangent is forced to match the tangent of the tread
+  arc, so there is no visible "shoulder kink" — the rounding is C1
+  continuous.
+</p>
+<p>
+  <code>z_bead_mm</code> is the axial offset of each bead from the
+  midplane. In a normal wheel assembly this is
+  <code>wheel_width_mm / 2</code>, which the
+  <a href="../wheel_assem.py">wheel assembler</a> supplies automatically.
+</p>
+
+<h2 id="dimensions">Cross-section &amp; dimensions</h2>
+<div class="figure">
+  <img src="diagrams/tire_section.png" alt="Tire cross-section dimensions">
+  <span class="caption">
+    Radial cross-section of the tire at the default parameters. Half is
+    drawn explicitly and mirrored across the spin axis. The rim slab
+    (light grey) is shown for scale only — it is not part of the tire
+    solid.
+  </span>
+</div>
+
+<h2 id="params">Parameter reference</h2>
+
+<h3>Cross-section (tire spec)</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>section_width_mm</code></td><td class="num">225</td><td>mm</td>
+        <td>Nominal cross-section width — the <code>225</code> in 225/45 R18.</td></tr>
+    <tr><td><code>aspect_ratio</code></td><td class="num">45</td><td>%</td>
+        <td>Sidewall height as a percentage of section width — the <code>45</code>.</td></tr>
+    <tr><td><code>rim_diameter_in</code></td><td class="num">18</td><td>in</td>
+        <td>Bead-seat diameter — the <code>18</code>. Determines <code>rim_radius_mm</code>.</td></tr>
+  </tbody>
+</table>
+
+<h3>Sidewall shape</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>sidewall_bulge_mm</code></td><td class="num">8</td><td>mm</td>
+        <td>Maximum radial outward bow of the sidewall above the rim flange.</td></tr>
+    <tr><td><code>sidewall_bulge_pos</code></td><td class="num">0.45</td><td>0..1</td>
+        <td>Axial position of the bulge maximum. 0 = at the bead, 1 = at the shoulder.</td></tr>
+    <tr><td><code>shoulder_radius_mm</code></td><td class="num">30</td><td>mm</td>
+        <td>How far back the Bezier&rsquo;s end handle sits from the tread edge.
+            Larger → more visible shoulder rounding.</td></tr>
+  </tbody>
+</table>
+
+<h3>Tread</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>tread_width_mm</code></td><td class="num">190</td><td>mm</td>
+        <td>Axial width of the crown arc footprint.</td></tr>
+    <tr><td><code>crown_radius_mm</code></td><td class="num">400</td><td>mm</td>
+        <td>Radius of the tread crown arc. Larger ≈ flatter crown.</td></tr>
+    <tr><td><code>rim_flange_mm</code></td><td class="num">18</td><td>mm</td>
+        <td>Radial height of the bead/flange ledge above the rim radius.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="derived">Derived values (read-only properties)</h2>
+<table>
+  <thead><tr><th>Property</th><th>Formula</th></tr></thead>
+  <tbody>
+    <tr><td><code>rim_radius_mm</code></td><td><code>rim_diameter_in × 25.4 / 2</code></td></tr>
+    <tr><td><code>sidewall_height_mm</code></td><td><code>section_width × aspect_ratio / 100</code></td></tr>
+    <tr><td><code>tire_od_mm</code></td><td><code>2 × (rim_radius + sidewall_height)</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="usage">Usage</h2>
+<pre><code>from paramub import TireSpec, build_tire
+
+spec = TireSpec(section_width_mm=245, aspect_ratio=40, rim_diameter_in=19)
+tire = build_tire(spec, z_bead_mm=spec.section_width_mm / 2 + 5)  # any axial half-width
+</code></pre>
+
+<p>
+  When used inside the wheel assembler, <code>z_bead_mm</code> is set
+  automatically from the <a href="spoke_builder.html">spoke spec</a>&rsquo;s
+  <code>wheel_width_mm / 2</code> so the bead lands exactly on the rim&rsquo;s
+  flange shoulder.
+</p>
+
+<h2 id="notes">Implementation notes</h2>
+<div class="callout info">
+  <strong>C1 shoulder rounding.</strong> The original kickoff spec called for
+  a separate shoulder arc + tread arc; with the chosen parameter ranges
+  those two arcs cannot be made tangent, leaving a sharp kink. We resolve
+  this by extending the sidewall Bezier all the way to the tread arc start
+  point and forcing its end tangent to match the tread tangent.
+  <code>shoulder_radius_mm</code> controls the depth of that rounding by
+  setting how far back <em>P2</em> sits from <em>P3</em>.
+</div>
+<div class="callout">
+  <strong>Validation.</strong> <code>TireSpec.validate()</code> rejects
+  <code>crown_radius_mm ≤ tread_width_mm/2 + 5</code> (would make the tread
+  arc impossible) and bulge positions outside <code>[0, 1]</code>.
+</div>
+
+<footer>ParamUB — auto-generated user guide. Regenerate diagrams with
+<code>python paramub/docs/_make_diagrams.py</code>.</footer>
+</main>
+</body>
+</html>

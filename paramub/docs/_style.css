@@ -1,0 +1,123 @@
+/* Shared style for the ParamUB user guides. */
+:root {
+  --fg: #1f2937;
+  --muted: #5b6471;
+  --accent: #1f4ed8;
+  --code-bg: #f3f4f6;
+  --table-border: #d1d5db;
+  --table-head-bg: #eef2ff;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  color: var(--fg);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        Roboto, Helvetica, Arial, sans-serif;
+  background: #fafbfc;
+}
+main {
+  max-width: 980px;
+  margin: 32px auto;
+  padding: 0 28px 60px;
+  background: white;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+header {
+  padding: 30px 28px 12px;
+  border-bottom: 1px solid #e5e7eb;
+  margin: 0 -28px 24px;
+}
+header h1 { margin: 0; font-size: 26px; }
+header .tag {
+  display: inline-block;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--table-head-bg);
+  padding: 3px 10px;
+  border-radius: 999px;
+  margin-bottom: 8px;
+}
+header .subtitle { color: var(--muted); margin: 6px 0 0; }
+h2 {
+  margin: 32px 0 8px;
+  padding-top: 8px;
+  border-top: 1px solid #f0f1f3;
+  font-size: 20px;
+}
+h3 { margin: 24px 0 6px; font-size: 16px; }
+p { margin: 8px 0; }
+code, pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; }
+pre {
+  background: var(--code-bg);
+  padding: 12px 14px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.45;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 14px 0 22px;
+  font-size: 13.5px;
+}
+th, td {
+  text-align: left;
+  border: 1px solid var(--table-border);
+  padding: 7px 10px;
+  vertical-align: top;
+}
+th { background: var(--table-head-bg); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.figure {
+  margin: 20px 0 28px;
+  text-align: center;
+}
+.figure img {
+  max-width: 100%;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: white;
+}
+.figure .caption {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.callout {
+  background: #fff8ed;
+  border-left: 4px solid #f59e0b;
+  padding: 10px 14px;
+  margin: 14px 0;
+  border-radius: 0 6px 6px 0;
+  font-size: 14px;
+}
+.callout.info {
+  background: #eef6ff;
+  border-color: var(--accent);
+}
+nav.toc {
+  background: #fafafa;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  margin: 12px 0 24px;
+}
+nav.toc ul { margin: 4px 0 0 18px; padding: 0; }
+nav.toc li { margin: 2px 0; }
+footer {
+  margin-top: 36px;
+  padding-top: 14px;
+  border-top: 1px solid #e5e7eb;
+  color: var(--muted);
+  font-size: 12px;
+}

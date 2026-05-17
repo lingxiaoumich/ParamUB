@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Wheelhouse Builder</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Builder 4 of 6</div>
+  <h1>Wheelhouse Builder</h1>
+  <p class="subtitle">
+    Single closed arch solid that wraps one wheel from above:
+    vertical sidewalls from the floor up to the widest tire point, then a
+    semicircular dome over the top. Optionally rounded with a 3D tangent
+    fillet on the inboard cap, and trimmed at the floor&rsquo;s lateral edge.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#xz">XZ cross-section</a></li>
+    <li><a href="#xy">XY plan view</a></li>
+    <li><a href="#params">Parameter reference</a></li>
+    <li><a href="#derived">Derived values</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#notes">Implementation notes</a></li>
+  </ul>
+</nav>
+
+<h2 id="overview">Overview</h2>
+<p>
+  The wheelhouse is built as a <em>closed solid</em> first — even in the
+  zero-thickness surface mode of the underbody. That&rsquo;s deliberate: the
+  same solid is used twice.
+</p>
+<ol>
+  <li>As a <strong>cutter</strong> for the floor surface, so the floor&rsquo;s
+      edge picks up the wheelhouse&rsquo;s fillet exactly (no holes or gaps).</li>
+  <li>As a <strong>source of outer faces</strong>: the bottom floor chord
+      and the outboard end cap are dropped, leaving only the dome +
+      sidewalls + inboard cap + fillet faces. Those become the final
+      wheelhouse surfaces in the underbody Compound.</li>
+</ol>
+
+<h2 id="xz">XZ cross-section</h2>
+<div class="figure">
+  <img src="diagrams/wheelhouse_section.png" alt="Wheelhouse XZ cross-section">
+  <span class="caption">
+    Cross-section through one wheelhouse along the wheel&rsquo;s spin axis. The
+    sidewalls are tangent to the dome at <code>z = tire_radius</code>, so
+    the cross-section reads as one smooth curve there. The floor chord
+    (the bottom of the solid) sits at <code>z = ride_height</code> and is
+    cut away when the floor surface is computed downstream.
+  </span>
+</div>
+
+<h2 id="xy">XY plan view</h2>
+<div class="figure">
+  <img src="diagrams/wheelhouse_plan.png" alt="Wheelhouse XY plan view">
+  <span class="caption">
+    Plan footprint of one wheelhouse (front-right corner shown). Rounded
+    corners on the inboard edge are the projection of the 3D fillet — it
+    wraps around the entire upper outline of the inboard cap (dome + both
+    sidewalls). The outboard edge is trimmed at the floor&rsquo;s lateral
+    perimeter so the wheelhouse never sticks past the floor&rsquo;s plan
+    outline.
+  </span>
+</div>
+
+<h2 id="params">Parameter reference</h2>
+
+<h3>Geometry &amp; placement</h3>
+<table>
+  <thead><tr><th>Parameter</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>axle_x</code></td><td>mm</td>
+        <td>X (forward) coordinate of the wheel center.</td></tr>
+    <tr><td><code>y_track</code></td><td>mm</td>
+        <td>Y (right) coordinate of the wheel center.</td></tr>
+    <tr><td><code>side</code></td><td>str</td>
+        <td><code>&quot;left&quot;</code> or <code>&quot;right&quot;</code> — picks which face is inboard.</td></tr>
+    <tr><td><code>tire_radius_mm</code></td><td>mm</td>
+        <td>Tire OD / 2 (the wheelhouse wraps this much plus the clearance).</td></tr>
+    <tr><td><code>tire_width_mm</code></td><td>mm</td>
+        <td>Tire axial width (= <code>section_width_mm</code>).</td></tr>
+  </tbody>
+</table>
+
+<h3>Clearances &amp; fillet</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>axial_clearance_mm</code></td><td class="num">30</td><td>mm</td>
+        <td>Radial gap between tire OD and arch ID.</td></tr>
+    <tr><td><code>lateral_clearance_mm</code></td><td class="num">35</td><td>mm</td>
+        <td>Extra Y per side (includes steering clearance on a front wheel).</td></tr>
+    <tr><td><code>thickness_mm</code></td><td class="num">6</td><td>mm</td>
+        <td>Shell thickness (used only in the solid floor mode; surface mode is zero thickness).</td></tr>
+    <tr><td><code>fillet_mm</code></td><td class="num">100</td><td>mm</td>
+        <td>Tangent fillet radius on the inboard cap&rsquo;s upper outline. 0 disables.</td></tr>
+  </tbody>
+</table>
+
+<h3>Underbody reference</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>ride_height_mm</code></td><td class="num">100</td><td>mm</td>
+        <td>Z of the flat floor underside. The wheelhouse floor chord sits here.</td></tr>
+    <tr><td><code>floor_edge_y</code></td><td class="num">900</td><td>mm</td>
+        <td>Signed Y of the floor&rsquo;s lateral edge on this side
+            (<code>± floor_width / 2</code>). The outboard trim uses this.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="derived">Derived values</h2>
+<table>
+  <thead><tr><th>Property</th><th>Formula</th></tr></thead>
+  <tbody>
+    <tr><td><code>arch_radius_mm</code></td><td><code>tire_radius_mm + axial_clearance_mm</code></td></tr>
+    <tr><td><code>arch_length_mm</code></td><td><code>tire_width_mm + 2 × lateral_clearance_mm</code></td></tr>
+  </tbody>
+</table>
+
+<h2 id="usage">Usage</h2>
+<pre><code>from paramub import WheelhouseSpec, build_wheelhouse_solid, extract_wheelhouse_surfaces
+from paramub.floor_builder import FloorSpec, build_below_cropper
+
+floor_spec = FloorSpec(floor_x_min=-2150, floor_x_max=2200,
+                       diffuser_start_x_mm=-1350)
+wh_spec = WheelhouseSpec(
+    axle_x=1350, y_track=775, side="right",
+    tire_radius_mm=330, tire_width_mm=225,
+    lateral_clearance_mm=185,      # base + 150 mm steering clearance
+    fillet_mm=100,
+    floor_edge_y=900,
+)
+solid = build_wheelhouse_solid(wh_spec)
+below = build_below_cropper(floor_spec).val()
+faces = extract_wheelhouse_surfaces(solid, wh_spec, below_cropper=below)
+</code></pre>
+
+<h2 id="notes">Implementation notes</h2>
+<div class="callout info">
+  <strong>Why a closed solid first?</strong> Earlier iterations cut the
+  floor with a plain cylinder (no fillet) — that left a gap between the
+  floor edge and the filleted wheelhouse face. Cutting the floor with the
+  <em>filleted</em> wheelhouse solid forces the floor&rsquo;s edge onto the
+  fillet boundary, so the two pieces share the exact same curve.
+</div>
+<div class="callout info">
+  <strong>Fillet wraps the whole inboard cap.</strong> The fillet runs
+  continuously from the floor, up one sidewall, around the dome, and back
+  down to the floor on the other side. The sidewall portion of the fillet
+  terminates at <code>z = ride_height</code>, where the floor cut trims it
+  to a clean edge downstream.
+</div>
+<div class="callout">
+  <strong>Outboard trim.</strong> If <code>y_track + arch_length/2</code>
+  would push the wheelhouse past the floor&rsquo;s lateral perimeter, the
+  outboard end is cut off at <code>floor_edge_y</code> with a half-space.
+  No-op when the wheelhouse already fits inside the floor plan.
+</div>
+
+<footer>ParamUB — auto-generated user guide. Regenerate diagrams with
+<code>python paramub/docs/_make_diagrams.py</code>.</footer>
+</main>
+</body>
+</html>
