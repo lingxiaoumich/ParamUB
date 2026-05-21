@@ -13,10 +13,25 @@
   <p class="subtitle">
     Six builders compose into one car-underbody assembly. Builders 1–2
     feed builder 3 (wheel); builders 4–5 plus four wheels feed builder 6
-    (underbody). HTML guides are provided for the four configurable
-    builders.
+    (underbody). A separate <a href="shell_extract.html">shell-extraction</a>
+    pre-processor strips wheels and underbody from a reconstructed
+    whole-car mesh so the upper shell can be merged with this generated
+    underbody.
   </p>
 </header>
+
+<h2>Shell extraction (pre-processor)</h2>
+<table>
+  <thead><tr><th>Module</th><th>What it does</th><th>Guide</th></tr></thead>
+  <tbody>
+    <tr><td><code>shell_extract</code> + <code>run_shell.py</code></td>
+        <td>Take a reconstructed whole-car mesh (UltraShape / Hunyuan3D);
+            canonicalize axes; remove wheels, wheelhouses, and underbody;
+            output a single-component upper shell ready to merge with the
+            generated underbody.</td>
+        <td><a href="shell_extract.html">shell_extract.html</a></td></tr>
+  </tbody>
+</table>
 
 <h2>Builders</h2>
 <table>
@@ -72,16 +87,23 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
 ├── ub_assem.py                # 6 — UnderbodySpec, build_underbody
 ├── generate.py                # generate(spec, output_mode)
 ├── _render_views.py           # PyVista subprocess renderer (no CadQuery imports)
+├── shell_extract.py           # upper-shell extraction (whole-car → upper shell)
+├── shell_render.py            # 10-panel matplotlib renderer for shell steps
 ├── docs/                      # ← you are here
 │   ├── index.html
+│   ├── userguide.html
 │   ├── tire_builder.html
 │   ├── spoke_builder.html
 │   ├── wheelhouse_builder.html
 │   ├── floor_builder.html
+│   ├── shell_extract.html
 │   ├── _style.css
 │   ├── _make_diagrams.py
-│   └── diagrams/*.png
+│   └── diagrams/                  # builder diagrams + shell/ step renders
 └── debug/                     # frozen prototypes (monolithic earlier versions)
+
+# Repo root
+run_shell.py                   # driver for the shell-extraction pipeline
 </code></pre>
 
 <footer>ParamUB — auto-generated documentation.</footer>

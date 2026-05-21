@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Upper Shell Extraction</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Pre-processor</div>
+  <h1>Upper Shell Extraction</h1>
+  <p class="subtitle">
+    Strip wheels, wheelhouses, and underbody from a watertight whole-car
+    reconstruction so the remaining upper-body shell can be merged with a
+    parametric underbody. Seven sequential steps; visibility-driven cut
+    with a geometric "cut zone" guard.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#step1">Step 1 — canonicalize</a></li>
+    <li><a href="#step2">Step 2 — clean planar cut at y = 0</a></li>
+    <li><a href="#step3">Step 3 — wheel (x, y) footprints</a></li>
+    <li><a href="#step4">Step 4 — wheel hub Z + radius</a></li>
+    <li><a href="#step5">Step 5 — wheel cylinder removal</a></li>
+    <li><a href="#step6a">Step 6a — wheel-center ray visibility</a></li>
+    <li><a href="#step6b">Step 6b — wheelhouse-zone geometric backstop</a></li>
+    <li><a href="#step7">Step 7 — lower-perimeter cut + cut-zone guard</a></li>
+    <li><a href="#driver">Driver: <code>run_shell.py</code></a></li>
+    <li><a href="#tuning">Tuning knobs</a></li>
+  </ul>
+</nav>
+
+<h2 id="overview">Overview</h2>
+<p>
+  The input is a watertight mesh covering the entire vehicle (typically a
+  "shadowfill" reconstruction from an UltraShape / Hunyuan3D pipeline) in
+  any axis convention. The output is a <em>single connected</em> upper-body
+  shell ready to be unioned with the parametric underbody produced by the
+  <a href="userguide.html"><code>generate</code></a> entry point.
+</p>
+<p>
+  The pipeline exploits the car's lateral symmetry — only the left half
+  (y ≤ 0) is processed. Each step modifies (or labels faces of) the working
+  mesh and writes an STL when run in debug mode. All renders below are
+  produced by <code>paramub.shell_render</code> (10-panel matplotlib
+  composite, Lambertian shading, per-step bounds).
+</p>
+<table>
+  <thead><tr><th>#</th><th>Function</th><th>Operation</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>s1_canonicalize</code></td>
+        <td>Detect input axes; rotate/translate to +x rearward, +y lateral, +z up; centre on x = 0; snap z = 0 to the ground.</td></tr>
+    <tr><td>2</td><td><code>s2_keep_left</code></td>
+        <td>Clean planar slice at y = 0; keep y ≤ 0 (left half).</td></tr>
+    <tr><td>3</td><td><code>s3_locate_wheel_xy</code></td>
+        <td>z-band cluster → 2 wheel footprint centres.</td></tr>
+    <tr><td>4</td><td><code>s4_locate_wheel_z</code></td>
+        <td>Y-slab + component-from-contact + circle fit → hub centre + tire radius + axial half-width.</td></tr>
+    <tr><td>5</td><td><code>s5_cylinder_remove</code></td>
+        <td>Mark faces inside the tight tire cylinder; drop debris.</td></tr>
+    <tr><td>6a</td><td><code>s6a_wheel_center_visibility</code></td>
+        <td>Cast Fibonacci-sphere rays from inside the wheel cavity → first-hit faces are inward wheelhouse surfaces; remove them in one pass.</td></tr>
+    <tr><td>6b</td><td><code>s6b_wheelhouse_zone_inward</code></td>
+        <td>Geometric backstop: remove inward-facing faces in an expanded wheelhouse zone (inboard side extended to y = 0).</td></tr>
+    <tr><td>7</td><td><code>s7_classify_visibility</code></td>
+        <td>Per-face two-hemisphere visibility classifier (KEEP / REMOVE / DROP), constrained to a <em>cut zone</em> so distant body parts can't be holed.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="step1">Step 1 — canonicalize</h2>
+<p>
+  <code>s1_canonicalize</code> auto-detects which input axis is "up" (the
+  one whose minimum sits closest to zero, i.e. the car rests on it) and
+  which horizontal axis is longest (the longitudinal direction). It builds
+  a permutation rotation <em>R</em> that maps those to <strong>+z</strong>
+  and <strong>+x</strong> respectively, optionally flipping the
+  longitudinal axis so the rear of the car sits at +x. Translation
+  re-centres the body so x = 0 splits front/rear and z = 0 sits flush with
+  the lowest vertex.
+</p>
+<div class="figure">
+  <img src="diagrams/shell/step1_canonical.png" alt="Step 1 — canonical frame">
+  <span class="caption">
+    10-panel view of the canonical mesh. The coloured triad in each panel
+    marks the canonical frame (+x rear, +y lateral, +z up). All later
+    steps operate in this frame.
+  </span>
+</div>
+<div class="callout info">
+  The forward transform is recorded in <code>CanonicalFrame</code>
+  (<em>R</em>, <em>t</em>) so downstream tooling can place the upper shell
+  back into the original input frame via
+  <code>frame.inverse_apply(v_canon)</code>.
+</div>
+
+<h2 id="step2">Step 2 — clean planar cut at y = 0</h2>
+<p>
+  <code>s2_keep_left</code> uses
+  <code>trimesh.intersections.slice_mesh_plane</code> with
+  <code>cap=False</code> to slice the mesh at y = 0 and keep the y ≤ 0
+  half. Faces straddling the plane are split; new vertices are inserted
+  <em>exactly</em> on y = 0, producing a clean planar boundary loop that
+  survives the later debris drops because we tag faces touching this
+  plane with a <code>protect_mask</code>.
+</p>
+<div class="figure">
+  <img src="diagrams/shell/step2_left_half.png" alt="Step 2 — left half">
+  <span class="caption">
+    Left half (y ≤ 0) after the planar slice. The translucent green plane
+    is y = 0. Roughly 50 % of the original faces are kept; ~6 700 vertices
+    now lie exactly on the symmetry plane.
+  </span>
+</div>
+
+<h2 id="step3">Step 3 — wheel (x, y) footprints</h2>
+<p>
+  <code>s3_locate_wheel_xy</code> samples a thin z-band (default
+  <code>z_band_height = 0.02</code> × bounding-box height) just above
+  the ground and clusters the resulting face centroids along x into
+  <code>n_expected = 2</code> groups. Each cluster's (mean x, mean y)
+  gives the front-left and rear-left wheel footprint.
+</p>
+<div class="figure">
+  <img src="diagrams/shell/step3_wheel_xy.png" alt="Step 3 — wheel xy">
+  <span class="caption">
+    Magenta dots mark the detected (x, y) footprint of each wheel — drawn
+    at z = 0 so they sit on the ground plane.
+  </span>
+</div>
+
+<h2 id="step4">Step 4 — wheel hub Z + radius</h2>
+<p>
+  Bare circle-fitting against a thin x-slab tends to pull the hub centre
+  upward because the wheelhouse arch leaks into the slab. Instead,
+  <code>s4_locate_wheel_z</code>:
+</p>
+<ol>
+  <li>Takes a thin <em>Y-plane</em> slab at <code>y = w.y</code>. The
+      Y-slab cuts cleanly through the tire's circular silhouette in X-Z
+      and ignores anything above the wheelhouse opening.</li>
+  <li>Runs face-adjacency connected components on the slab faces. The
+      tire is one component; the wheelhouse walls, suspension, and brake
+      disc are separate components.</li>
+  <li>Picks the component containing the most ground-contact faces
+      (low z + close in x to the footprint centre) — that's the tire.</li>
+  <li>Fits a circle to the chosen component's centroids in X-Z. The fit's
+      (<em>cx</em>, <em>cz</em>) is the hub position.</li>
+  <li>Sets <strong>radius = max(r_fit, cz)</strong> — the tire touches
+      z = 0, so its outer radius equals the hub height.</li>
+  <li>Estimates the tire axial half-width from the 95th-percentile
+      y-extent of the contact patch, clamped to <code>[0.20, 0.40]</code>
+      × radius.</li>
+</ol>
+<div class="figure">
+  <img src="diagrams/shell/step4_wheel_z.png" alt="Step 4 — wheel z">
+  <span class="caption">
+    Orange dots are the refined 3-D hub positions. Each carries
+    <em>r</em> (tire OD) and <em>axial_half</em> (tire half-width) used
+    by step 5.
+  </span>
+</div>
+
+<h2 id="step5">Step 5 — wheel cylinder removal</h2>
+<p>
+  <code>s5_cylinder_remove</code> marks every face whose centroid sits
+  inside a tight cylinder centred on the hub for removal:
+</p>
+<pre><code>radius     = w.radius     × radius_factor   (default 1.00)
+axial_half = w.axial_half × axial_factor    (default 1.00)
+cylinder axis = +y                          (tire spin axis)</code></pre>
+<p>
+  After the cut, <code>keep_largest_component</code> drops any small KEEP
+  islands that the cylinder isolated from the main body. Faces touching
+  the y = 0 plane are protected — so the planar boundary from step 2
+  survives.
+</p>
+<div class="figure">
+  <img src="diagrams/shell/step5_cylinder.png" alt="Step 5 — wheel cylinder removed">
+  <span class="caption">
+    Translucent orange cylinders show the tight tire envelopes that were
+    removed; the body is now hollow at each wheel position but the
+    wheelhouse interior surfaces are still present.
+  </span>
+</div>
+<div class="callout">
+  <strong>Why so tight (1.00 / 1.00)?</strong> Any larger and the cylinder
+  starts removing chunks of the bumper or rocker panel. The remaining
+  wheelhouse surfaces are handled by steps 6a / 6b, which use
+  visibility instead of raw geometry.
+</div>
+
+<h2 id="step6a">Step 6a — wheel-center ray visibility</h2>
+<p>
+  With the tire gone, the wheelhouse cavity is now exposed. <code>s6a_wheel_center_visibility</code>
+  builds an Embree intersector from the post-s5 KEEP submesh and casts
+  <strong>16 384 Fibonacci-sphere rays</strong> from each of <strong>7
+  origins per wheel</strong>:
+</p>
+<ul>
+  <li>The hub centre.</li>
+  <li>6 points on the upper half of the cylinder's <em>inboard</em>
+      edge (so rays can sweep through the brake/suspension region).</li>
+</ul>
+<p>
+  Every face hit becomes a candidate for REMOVE; all hits are aggregated
+  first, then applied in <em>one pass</em>. Hits outside the
+  wheelhouse zone (2.5 × r × 2.0 × axial_half) or above a z-cap
+  (2.2 × hub_z) are rejected so the rays cannot punch through the
+  upper body. Faces already in the s5 REMOVE set are excluded from the
+  intersector so they don't shadow the rays.
+</p>
+<div class="figure">
+  <img src="diagrams/shell/step6a_wheel_rays.png" alt="Step 6a — wheel rays">
+  <span class="caption">
+    Body after the single-pass ray REMOVE. The wheelhouse arch top and
+    most of the inner liner are gone; some inward-facing suspension /
+    inboard liner remains because brake-disc / strut geometry occludes
+    every ray from the seven origins.
+  </span>
+</div>
+<div class="callout info">
+  <strong>Why one pass, not iterative?</strong> The input mesh is
+  watertight and single-layer. Iterating "cast → remove → cast again"
+  caused rays from the second iteration to escape <em>through</em> the
+  upper bodywork (now exposed), removing the roof. One pass is enough
+  for any face that has line-of-sight from inside the wheel cavity.
+</div>
+
+<h2 id="step6b">Step 6b — wheelhouse-zone geometric backstop</h2>
+<p>
+  Some inward-facing surfaces (inboard wheelhouse wall, control-arm tops)
+  are <em>never</em> visible from inside the wheel cavity because the
+  brake disc or suspension hardware sits directly between them and every
+  ray origin. <code>s6b_wheelhouse_zone_inward</code> catches them with a
+  purely geometric test:
+</p>
+<pre><code>face is REMOVE if BOTH:
+  centroid sits inside an enlarged cylinder
+    (radius_factor = 1.4, axial_factor = 1.7,
+     inboard side extended all the way to y = 0)
+  AND face's outward normal points toward the hub
+    (cos(normal, hub - centroid) ≥ 0.30)</code></pre>
+<p>
+  The inboard extension to y = 0 covers the deep inboard wall and any
+  suspension hardware at any depth; the outboard side keeps the symmetric
+  envelope.
+</p>
+<div class="figure">
+  <img src="diagrams/shell/step6b_wheelhouse_zone.png" alt="Step 6b — wheelhouse zone inward">
+  <span class="caption">
+    After 6b. The inboard wheelhouse wall and remaining suspension are
+    gone; what's left around each wheel is the outer perimeter of the
+    arch, which the lower-cut in step 7 will trim flush with the rocker.
+  </span>
+</div>
+
+<h2 id="step7">Step 7 — lower-perimeter cut (visibility + cut zone)</h2>
+
+<h3>Two-hemisphere visibility classifier</h3>
+<p>
+  <code>s7_classify_visibility</code> casts a Fibonacci-sphere bundle
+  (default 96 directions, equator band ±15° skipped) from each face's
+  epsilon-nudged centroid. For each ray on the triangle's outward side, an
+  Embree query tests whether it hits any other triangle. The verdict per
+  face:
+</p>
+<table>
+  <thead><tr><th>Label</th><th>Condition</th></tr></thead>
+  <tbody>
+    <tr><td><code>KEEP</code></td>
+        <td>at least one upper-hemisphere ray escapes (visible from above).</td></tr>
+    <tr><td><code>REMOVE</code></td>
+        <td>no upper escape, but at least one lower escape (visible only from below).</td></tr>
+    <tr><td><code>DROP</code></td>
+        <td>no rays escape (interior / sealed cavity).</td></tr>
+  </tbody>
+</table>
+<p>
+  A cheap geometric prefilter (face in bottom 31 % of z-envelope AND
+  downward normal) pre-marks obvious underbody faces so the lower-pass
+  rays for those faces can be skipped.
+</p>
+
+<h3>Cut zone</h3>
+<p>
+  Without a guard, the classifier punches holes in any feature that is
+  partially recessed (bumper intake, headlight bezel, mirror underside,
+  vent). The cut zone constrains every REMOVE/DROP to a region where it
+  is structurally safe — outside the zone, faces are forced back to KEEP:
+</p>
+<pre><code>cut_zone = (z &lt; floor_z_max)                  # bottom 15 % of body
+         ∪ (enlarged wheel cylinders)
+              radius_factor = 1.3
+              axial_factor  = 1.3 (inboard)
+              outboard side extended → body y_min
+              (so the cylinder is flush with the floor slab)</code></pre>
+<p>
+  Finally, KEEP faces are passed through <code>keep_largest_component</code>
+  <em>without</em> the y = 0 protect mask — the output is a single
+  connected upper shell; tiny y = 0-edge slivers from the lower-cut get
+  dropped along with the rest of the debris.
+</p>
+<div class="figure">
+  <img src="diagrams/shell/step7_final_shell.png" alt="Step 7 — final upper shell">
+  <span class="caption">
+    Final single-component upper shell, left half only
+    (~327 k faces from a ~1.5 M-face whole-car input). Ready to be
+    mirrored, ground-aligned, and unioned with the parametric underbody.
+  </span>
+</div>
+
+<h2 id="driver">Driver: <code>run_shell.py</code></h2>
+<p>
+  All seven steps are wrapped by <code>run_shell.py</code> at the repo
+  root. It takes one input mesh and writes either the final STL alone or
+  the final + per-step debug STLs + per-step PNG composites.
+</p>
+<pre><code>conda activate paramub
+
+# Production — just the final shell + metadata
+python run_shell.py
+
+# Debug — also export per-step STLs to outputs/shell/&lt;name&gt;_debug/
+python run_shell.py --debug
+
+# Render — also write the 10-panel PNG composites used in this guide
+python run_shell.py --render
+
+# Both
+python run_shell.py --debug --render
+
+# Custom input / output
+python run_shell.py --input path/to/mesh.stl --output-dir outputs/run1
+</code></pre>
+<h3>Outputs</h3>
+<table>
+  <thead><tr><th>File</th><th>When</th><th>Contents</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;name&gt;_final.stl</code></td><td>always</td>
+        <td>Single-component upper shell.</td></tr>
+    <tr><td><code>&lt;name&gt;_meta.json</code></td><td>always</td>
+        <td>Numeric metadata: canonical frame matrix, wheel hub positions, per-step face counts, step-7 KEEP/REMOVE/DROP totals.</td></tr>
+    <tr><td><code>&lt;name&gt;_debug/stepN_*.stl</code></td><td><code>--debug</code></td>
+        <td>step1 canonical · step2 left half · step5 kept + wheel cylinders · step6a kept · step6b kept · step7 cut-zone volume + KEEP/REMOVE/DROP + boundary tube.</td></tr>
+    <tr><td><code>&lt;name&gt;_renders/stepN_*.png</code></td><td><code>--render</code></td>
+        <td>10-panel composites (Front, Rear, Top, Bottom, Left, Right, +4 iso).</td></tr>
+  </tbody>
+</table>
+
+<h2 id="tuning">Tuning knobs</h2>
+<p>The defaults work for the test corpus; adjust if a specific mesh
+gives a poor cut.</p>
+<table>
+  <thead><tr><th>Where</th><th>Knob</th><th>Default</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td>s5</td><td><code>radius_factor</code> / <code>axial_factor</code></td>
+        <td>1.00 / 1.00</td>
+        <td>Wheel-removal cylinder size. Larger eats bodywork; smaller leaves tire bits.</td></tr>
+    <tr><td>s6a</td><td><code>n_rays_per_origin</code></td><td>16 384</td>
+        <td>Fibonacci-sphere ray count per origin.</td></tr>
+    <tr><td>s6a</td><td><code>zone_radius_factor</code> / <code>zone_axial_factor</code></td>
+        <td>2.5 / 2.0</td>
+        <td>Outer cap on which hits qualify for REMOVE.</td></tr>
+    <tr><td>s6a</td><td><code>z_max_factor</code></td><td>2.2</td>
+        <td>Hits above <code>2.2 × hub_z</code> are rejected (protects the upper body).</td></tr>
+    <tr><td>s6b</td><td><code>radius_factor</code> / <code>axial_factor</code></td>
+        <td>1.4 / 1.7</td>
+        <td>Geometric wheelhouse zone (inboard side extends to y = 0 regardless).</td></tr>
+    <tr><td>s6b</td><td><code>inward_cos_threshold</code></td><td>0.30</td>
+        <td>How "inward" a face must point to qualify (cos with hub direction).</td></tr>
+    <tr><td>s7</td><td><code>n_dirs</code></td><td>96</td>
+        <td>Fibonacci-sphere ray bundle size per face.</td></tr>
+    <tr><td>s7</td><td><code>equator_band_deg</code></td><td>15.0</td>
+        <td>± elevation band around the equator that does not vote for KEEP or REMOVE.</td></tr>
+    <tr><td>s7</td><td><code>prefilter_z_band_frac</code></td><td>0.31</td>
+        <td>z-fraction of the body to consider "lower" for the cheap prefilter.</td></tr>
+    <tr><td>s7</td><td><code>prefilter_normal_z_max</code></td><td>−0.30</td>
+        <td>Downward-normal threshold for the prefilter (cos of the normal with +z).</td></tr>
+    <tr><td>driver</td><td><code>CUT_ZONE_FLOOR_FRAC</code></td><td>0.15</td>
+        <td>Floor band height as a fraction of the body's z-envelope.</td></tr>
+    <tr><td>driver</td><td><code>CUT_ZONE_WHEEL_FAC</code></td><td>1.3</td>
+        <td>Multiplier on the wheel cylinder's radius and inboard axial half (outboard side always extends to body y_min).</td></tr>
+  </tbody>
+</table>
+
+<footer>ParamUB — auto-generated user guide.
+Renders produced by <code>python run_shell.py --render</code>
+(see <code>paramub/shell_render.py</code>).</footer>
+</main>
+</body>
+</html>

@@ -109,6 +109,21 @@ generate(spec, output_dir="outputs/sport", stem="sport", output_mode="all")
   <li><a href="floor_builder.html">floor_builder</a> — floor + diffuser geometry</li>
 </ul>
 
+<h2>Upper-shell extraction</h2>
+<p>
+  If you start from a reconstructed whole-car mesh (UltraShape /
+  Hunyuan3D) and want to drop in this generator's parametric underbody,
+  run the seven-step shell-extraction pipeline first to strip wheels,
+  wheelhouses, and underbody:
+</p>
+<pre><code>conda activate paramub
+python run_shell.py --input data/car.stl --output-dir outputs/shell
+# writes outputs/shell/car_final.stl  (single-component upper shell)
+</code></pre>
+<p>See the <a href="shell_extract.html">shell_extract guide</a> for the
+full seven-step walkthrough with per-step renders, the visibility
+classifier, the cut-zone guard, and all tuning knobs.</p>
+
 <footer>ParamUB — see <code>paramub/</code> for source. Frozen prototypes live in <code>paramub/debug/</code>.</footer>
 </main>
 </body>
