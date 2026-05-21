@@ -71,6 +71,10 @@ TARGET_WHEELBASE_MM = 2700.0
 # Shell-derived geometry hints
 # ---------------------------------------------------------------------------
 
+REAR_EDGE_BAND_MM = 50.0   # band from body_x_max used to measure rear-edge z
+ROCKER_LINE_FRAC = 0.20    # fraction of body z-envelope considered "low" for the rocker
+
+
 def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
                   scale: float) -> dict:
     """Pull every geometry hint the underbody spec needs out of the shell
@@ -122,10 +126,27 @@ def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
                          (np.abs(centroids[:, 1] - wy) < wr)]
         wh_top[label] = float(near[:, 2].max()) if len(near) else None
 
-    # Rear bottom edge: the lowest z within the rearmost 15% of the body
-    # (i.e. behind the rear wheel). This sets the diffuser exit height.
-    rear_tail_mask = centroids[:, 0] > (x_max_body - 0.15 * (x_max_body - x_min_body))
-    rear_tail_min_z = float(centroids[rear_tail_mask, 2].min())
+    # Rear-edge z: lowest shell vertex within REAR_EDGE_BAND_MM of the
+    # very rear (x ≥ x_max_body − band). This is the actual bumper bottom
+    # AT THE TAIL — the diffuser exit should match this, not the min over
+    # the full last 15% of the body (which can include the much lower
+    # underside well in front of the bumper tip).
+    rear_edge_mask = verts[:, 0] > (x_max_body - REAR_EDGE_BAND_MM)
+    rear_edge_min_z = float(verts[rear_edge_mask, 2].min()) if rear_edge_mask.any() else ride_height
+
+    # Per-wheel outboard extent: max |y| of the SHELL'S WHEELHOUSE
+    # OPENING for each wheel. Used to size the parametric wheelhouse so
+    # its outboard edge reaches the shell's rocker line.
+    wheel_outboard_y = {}
+    for label, w in (("front", front_w), ("rear", rear_w)):
+        wx = w["x"] * scale
+        wr = w["radius"] * scale * 1.3
+        # Take low-z shell vertices in a band around the wheel x; their
+        # most-outboard y (max |y|) gives the rocker line at this x.
+        z_low = ride_height + 0.30 * (body_bounds[1, 2] - body_bounds[0, 2])
+        col_mask = (np.abs(verts[:, 0] - wx) < wr) & (verts[:, 2] < z_low)
+        wheel_outboard_y[label] = float(np.abs(verts[col_mask, 1]).max()) \
+            if col_mask.any() else None
 
     # Floor width: how wide the underbody footprint is at low z. We sample
     # faces in the bottom 25% of the body's z range and take the y extent.
@@ -152,7 +173,8 @@ def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
         body_bounds_mm=body_bounds.tolist(),
         midpoint_x_shell_mm=midpoint_x_shell,
         wheelhouse_top_mm=wh_top,
-        rear_tail_min_z_mm=rear_tail_min_z,
+        rear_edge_min_z_mm=rear_edge_min_z,
+        wheel_outboard_y_mm=wheel_outboard_y,
         front_x_shell_mm=front_x_shell,
         rear_x_shell_mm=rear_x_shell,
     )
@@ -164,32 +186,64 @@ def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
 
 def diffuser_angle_from_hints(hints: dict) -> float:
     """Pick a diffuser ramp angle so the trailing edge of the diffuser
-    sits close to the rear bottom edge of the upper shell.
+    sits at the shell's actual rear-edge bottom — i.e. the lowest shell
+    vertex within a small band of the rearmost x. This places the diffuser
+    exit flush with the bumper TIP, not the much lower point at the
+    underside of the body well in front of the bumper.
 
-    In ParamUB's frame, the diffuser starts at the rear axle (x = -wheelbase/2)
-    and ramps up over the ``rear_overhang_mm`` distance until it reaches
-    the floor's rear edge (x = -wheelbase/2 - rear_overhang_mm). After the
-    x-reflection that maps to the shell frame, the trailing edge sits at
-    the rearmost x of the shell.
-
-    Rise needed = rear_tail_min_z - ride_height.
-    Run available = rear_overhang_mm.
+    Rise needed = rear_edge_min_z - ride_height.
+    Run available = rear_overhang_mm (distance from rear axle to body tail).
     angle = atan2(rise, run)  (in degrees), clamped to [0°, 25°].
     """
-    rise = max(0.0, hints["rear_tail_min_z_mm"] - hints["ride_height_mm"])
+    rise = max(0.0, hints["rear_edge_min_z_mm"] - hints["ride_height_mm"])
     run = max(1.0, hints["rear_overhang_mm"])
     angle = degrees(atan2(rise, run))
     angle = float(np.clip(angle, 0.0, 25.0))
-    print(f"[diffuser] rise={rise:.1f} mm  run={run:.1f} mm  "
-          f"→ angle={angle:.2f}°")
+    print(f"[diffuser] rear-edge z={hints['rear_edge_min_z_mm']:.1f} mm  "
+          f"ride_height={hints['ride_height_mm']:.1f} mm  → "
+          f"rise={rise:.1f} mm  run={run:.1f} mm  →  angle={angle:.2f}°")
     return angle
+
+
+def lateral_clearance_overrides(hints: dict) -> dict:
+    """Per-wheel lateral_clearance for the wheelhouse so its outboard
+    edge reaches the shell's rocker line at that wheel.
+
+    The wheelhouse arch is symmetric in y about y_track with half-length
+    = (tire_width + 2 * lateral_clearance) / 2 = tire_width/2 +
+    lateral_clearance. So to make the outboard edge land at the shell's
+    outboard rocker y (= ``wheel_outboard_y``), we need:
+
+        lateral_clearance = wheel_outboard_y - track/2 - tire_width/2
+
+    Inboard side is extended symmetrically (the wheelhouse builder
+    doesn't support per-side asymmetry) — typically this just makes the
+    inboard wall slightly wider, which is harmless against the floor.
+    """
+    overrides: dict[tuple[str, str], float] = {}
+    track_half = hints["track_mm"] / 2.0
+    tire_half = hints["tire_width_mm"] / 2.0
+    for axle_label in ("front", "rear"):
+        outboard = hints["wheel_outboard_y_mm"].get(axle_label)
+        if outboard is None:
+            continue
+        need = max(0.0, outboard - track_half - tire_half)
+        # Add a small margin so the wheelhouse fully reaches the rocker.
+        need += 5.0
+        overrides[(axle_label, "left")] = need
+        overrides[(axle_label, "right")] = need
+        print(f"[wheelhouse] {axle_label}: shell rocker y={outboard:.0f}  "
+              f"→ lateral_clearance={need:.1f} mm  "
+              f"(track/2={track_half:.0f}, tire_half={tire_half:.0f})")
+    return overrides
 
 
 # ---------------------------------------------------------------------------
 # Spec construction
 # ---------------------------------------------------------------------------
 
-def build_spec(hints: dict, diffuser_angle: float):
+def build_spec(hints: dict, diffuser_angle: float,
+                lat_overrides: dict | None = None):
     """Construct an UnderbodySpec from the shell-derived hints."""
     from paramub import UnderbodySpec, WheelSpec, TireSpec, SpokeSpec
 
@@ -250,6 +304,7 @@ def build_spec(hints: dict, diffuser_angle: float):
         toe_front_deg=0.0,
         toe_rear_deg=0.0,
         wheel=WheelSpec(tire=tire, spoke=spoke),
+        lateral_clearance_overrides_mm=lat_overrides,
     )
     return spec
 
@@ -319,6 +374,98 @@ def keep_left_half(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 # ---------------------------------------------------------------------------
 # Perimeter trim: drop underbody faces whose xy is far from the shell xy
 # ---------------------------------------------------------------------------
+
+def extract_outer_boundary_polygon(shell_mm: trimesh.Trimesh,
+                                     ignore_y_eps: float = 5.0,
+                                     concave_ratio: float = 0.04):
+    """Build a closed polygon (in xy) that traces the outer lower
+    silhouette of the shell. We:
+
+    1. Process the shell to merge duplicate vertices (CadQuery STL output
+       has no vertex sharing).
+    2. Collect every OPEN boundary-edge endpoint (each edge appearing in
+       exactly one face). These lie on the shell's actual boundary loops
+       (rocker bottoms, bumper bottoms, wheelhouse openings, etc.).
+    3. Drop endpoints on the y=0 symmetry plane (artificial cut, not a
+       body silhouette).
+    4. Mirror the points across y=0 so the resulting hull is symmetric
+       and we get a single closed contour around the WHOLE car (instead
+       of a half-car with a flat side on y=0).
+    5. Compute a concave hull (alpha shape) and clip it back to y ≤ 0.
+
+    Returns a shapely Polygon in xy, in mm.
+    """
+    from shapely.geometry import MultiPoint, Polygon, box
+
+    sh = trimesh.Trimesh(vertices=shell_mm.vertices.copy(),
+                          faces=shell_mm.faces.copy(),
+                          process=True)
+    edges = sh.edges_sorted
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_pairs = unique[counts == 1]
+    v = sh.vertices
+    a = v[boundary_pairs[:, 0]]
+    b = v[boundary_pairs[:, 1]]
+    keep = ~((np.abs(a[:, 1]) < ignore_y_eps) & (np.abs(b[:, 1]) < ignore_y_eps))
+    a = a[keep]; b = b[keep]
+    pts_xy = np.vstack([a[:, :2], b[:, :2]])
+    print(f"[boundary] {len(a):,} open boundary edges → "
+          f"{len(pts_xy):,} xy points (y=0 cut filtered)")
+
+    # Mirror so the concave hull spans both sides.
+    mirrored = np.column_stack([pts_xy[:, 0], -pts_xy[:, 1]])
+    all_pts = np.vstack([pts_xy, mirrored])
+
+    mp = MultiPoint(all_pts)
+    try:
+        hull = mp.concave_hull(ratio=concave_ratio)
+    except AttributeError:
+        # shapely < 2.0
+        hull = mp.convex_hull
+
+    if isinstance(hull, Polygon) and not hull.is_empty:
+        # Clip to y <= 0 (the half we care about).
+        b = sh.bounds
+        bb = box(b[0, 0] - 100, b[0, 1] - 100, b[1, 0] + 100, 0.0)
+        clipped = hull.intersection(bb)
+        if clipped.is_empty:
+            clipped = hull
+        # If the intersection produced a MultiPolygon, pick the largest.
+        if clipped.geom_type == "MultiPolygon":
+            clipped = max(clipped.geoms, key=lambda g: g.area)
+        print(f"[boundary] hull area={hull.area:.0f} mm²  "
+              f"clipped (y≤0) area={clipped.area:.0f} mm²")
+        return clipped
+    print("[boundary] hull came back empty; falling back to convex hull")
+    return mp.convex_hull
+
+
+def trim_to_shell_boundary(underbody: trimesh.Trimesh,
+                            boundary_polygon) -> trimesh.Trimesh:
+    """Trim UB faces whose centroid xy lies outside the shell's outer
+    boundary polygon (projected to xy)."""
+    try:
+        from shapely import contains_xy
+    except ImportError:
+        from shapely.vectorized import contains as contains_xy
+    centroids = underbody.vertices[underbody.faces].mean(axis=1)
+    if hasattr(boundary_polygon, "geom_type"):
+        keep = contains_xy(boundary_polygon, centroids[:, 0], centroids[:, 1])
+    else:
+        keep = np.ones(len(centroids), dtype=bool)
+    keep_idx = np.flatnonzero(keep)
+    print(f"[trim] boundary-polygon  -> keep {int(keep.sum()):,}/"
+          f"{len(keep):,} faces (dropped {int((~keep).sum()):,})")
+    if len(keep_idx) == 0:
+        # nothing kept — return an empty trimesh to avoid crashing the rest
+        return trimesh.Trimesh(vertices=underbody.vertices[:0],
+                                faces=np.zeros((0, 3), dtype=np.int64),
+                                process=False)
+    kept = underbody.submesh([keep_idx], append=True)
+    if isinstance(kept, list):
+        kept = kept[0]
+    return kept
+
 
 def trim_to_shell_footprint(underbody: trimesh.Trimesh,
                              shell_mm: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -513,11 +660,12 @@ def main():
 
     hints = extract_hints(shell, meta, scale)
     diffuser_angle = diffuser_angle_from_hints(hints)
-    spec = build_spec(hints, diffuser_angle)
+    lat_overrides = lateral_clearance_overrides(hints)
+    spec = build_spec(hints, diffuser_angle, lat_overrides=lat_overrides)
 
-    print("\n[paramub] build_underbody ...")
+    print("\n[paramub] build_underbody (half_only=True) ...")
     from paramub.ub_assem import build_underbody
-    asy, layout = build_underbody(spec)
+    asy, layout = build_underbody(spec, half_only=True)
     print(f"[paramub] layout = {layout}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -542,7 +690,17 @@ def main():
     ub_left = keep_left_half(ub_aligned)
     print(f"[left]  faces={len(ub_left.faces):,}  "
           f"y range=({ub_left.bounds[0,1]:.1f}, {ub_left.bounds[1,1]:.1f})")
-    ub_trim = trim_to_shell_footprint(ub_left, shell_mm)
+    # Build a polygon from the shell's outer open-boundary loop and
+    # trim UB faces whose centroid xy lies outside it. This is closer to
+    # what the user wanted ("project the shell EDGE onto the UB") than
+    # the previous full-mesh ray-up test, which kept floor area under
+    # the hood/trunk that extended beyond the body's lower silhouette.
+    boundary = extract_outer_boundary_polygon(shell_mm)
+    # Dump the boundary polygon as a small debug PNG so we can see what
+    # the trim is actually using.
+    _dump_boundary_debug(shell_mm, boundary,
+                         args.output_dir / f"{args.shell_meta.stem.replace('_meta', '')}_boundary.png")
+    ub_trim = trim_to_shell_boundary(ub_left, boundary)
     print(f"[trim]  faces={len(ub_trim.faces):,}  "
           f"y range=({ub_trim.bounds[0,1]:.1f}, {ub_trim.bounds[1,1]:.1f})")
 
@@ -582,6 +740,32 @@ def main():
     return 0
 
 
+def _dump_boundary_debug(shell_mm, polygon, out_png: Path) -> None:
+    """Save a top-down PNG: shell xy footprint + boundary polygon."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(10, 6))
+    # Shell vertices (xy scatter)
+    v = shell_mm.vertices
+    ax.scatter(v[::50, 0], v[::50, 1], s=0.5, c="#888", alpha=0.3,
+                label="shell verts (subsampled)")
+    # Boundary polygon
+    if hasattr(polygon, "exterior"):
+        ex = np.asarray(polygon.exterior.coords)
+        ax.plot(ex[:, 0], ex[:, 1], "r-", linewidth=1.5,
+                 label="boundary polygon (concave hull of open edges)")
+    ax.set_aspect("equal")
+    ax.set_xlabel("x (mm)")
+    ax.set_ylabel("y (mm)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_title("Shell xy footprint + trim boundary polygon")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=120)
+    plt.close(fig)
+    print(f"[debug] wrote {out_png}")
+
+
 def _spec_to_jsonable(spec):
     from dataclasses import is_dataclass, asdict as _asdict
     if is_dataclass(spec):
@@ -589,7 +773,10 @@ def _spec_to_jsonable(spec):
     if isinstance(spec, (list, tuple)):
         return [_spec_to_jsonable(v) for v in spec]
     if isinstance(spec, dict):
-        return {k: _spec_to_jsonable(v) for k, v in spec.items()}
+        # JSON keys must be str; stringify any non-str keys (e.g. tuples).
+        return {(k if isinstance(k, (str, int, float, bool, type(None)))
+                  else str(k)): _spec_to_jsonable(v)
+                for k, v in spec.items()}
     return spec
 
 

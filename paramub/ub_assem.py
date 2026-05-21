@@ -106,6 +106,11 @@ class UnderbodySpec:
     wheel: WheelSpec = field(default_factory=WheelSpec)
     rear_wheel: Optional[WheelSpec] = None
 
+    # Per-corner lateral-clearance overrides for the wheelhouse — keyed by
+    # (axle, side), e.g. {("rear", "left"): 130.0}. None / missing keys
+    # fall back to wheel_house_lateral_clearance_mm + steering clearance.
+    lateral_clearance_overrides_mm: Optional[dict] = None
+
 
 def _compute_layout(spec: UnderbodySpec) -> dict:
     front_axle_x = +spec.wheelbase_mm / 2.0
@@ -148,28 +153,40 @@ def _cut_face_with_solid(face_shape, solid_shape):
 
 def _make_wheelhouse_specs(spec: UnderbodySpec, layout: dict,
                             tire_radius_f: float, tire_width_f: float,
-                            tire_radius_r: float, tire_width_r: float):
-    front_lat = (spec.wheel_house_lateral_clearance_mm
-                 + spec.front_steering_clearance_mm)
-    rear_lat = (spec.wheel_house_lateral_clearance_mm
-                + spec.rear_steering_clearance_mm)
+                            tire_radius_r: float, tire_width_r: float,
+                            sides: tuple[str, ...] = ("left", "right")):
+    """Per-corner WheelhouseSpec list. ``sides`` filters which sides are
+    emitted (default both). Per-corner lateral clearance can be overridden
+    via ``spec.lateral_clearance_overrides_mm`` — a dict keyed by
+    ``(axle, side)`` where axle ∈ {"front", "rear"} and side ∈ {"left",
+    "right"}; the value REPLACES the base lateral_clearance for that
+    corner (it does NOT add to the steering clearance)."""
+    overrides = getattr(spec, "lateral_clearance_overrides_mm", None) or {}
+    base_front = (spec.wheel_house_lateral_clearance_mm
+                  + spec.front_steering_clearance_mm)
+    base_rear = (spec.wheel_house_lateral_clearance_mm
+                 + spec.rear_steering_clearance_mm)
     y_half = spec.floor_width_mm / 2.0
+
+    def lat(axle: str, side: str, base: float) -> float:
+        return float(overrides.get((axle, side), base))
 
     targets = [
         # axle_x, y_track, tire_r, tire_w, lat_clear, side, fillet
         (layout["front_axle_x"], +spec.track_front_mm / 2.0,
-         tire_radius_f, tire_width_f, front_lat, "right",
-         spec.front_wheel_house_fillet_mm),
+         tire_radius_f, tire_width_f, lat("front", "right", base_front),
+         "right", spec.front_wheel_house_fillet_mm),
         (layout["front_axle_x"], -spec.track_front_mm / 2.0,
-         tire_radius_f, tire_width_f, front_lat, "left",
-         spec.front_wheel_house_fillet_mm),
+         tire_radius_f, tire_width_f, lat("front", "left", base_front),
+         "left", spec.front_wheel_house_fillet_mm),
         (layout["rear_axle_x"], +spec.track_rear_mm / 2.0,
-         tire_radius_r, tire_width_r, rear_lat, "right",
-         spec.rear_wheel_house_fillet_mm),
+         tire_radius_r, tire_width_r, lat("rear", "right", base_rear),
+         "right", spec.rear_wheel_house_fillet_mm),
         (layout["rear_axle_x"], -spec.track_rear_mm / 2.0,
-         tire_radius_r, tire_width_r, rear_lat, "left",
-         spec.rear_wheel_house_fillet_mm),
+         tire_radius_r, tire_width_r, lat("rear", "left", base_rear),
+         "left", spec.rear_wheel_house_fillet_mm),
     ]
+    targets = [t for t in targets if t[5] in sides]
     out = []
     for ax, yt, tr, tw, lc, side, fr in targets:
         sign = +1.0 if side == "right" else -1.0
@@ -186,16 +203,25 @@ def _make_wheelhouse_specs(spec: UnderbodySpec, layout: dict,
     return out
 
 
-def build_underbody(spec: Optional[UnderbodySpec] = None):
-    """Top-level: build floor + 4 wheelhouses + place 4 wheels.
+def build_underbody(spec: Optional[UnderbodySpec] = None,
+                     half_only: bool = False):
+    """Top-level: build floor + wheelhouses + place wheels.
+
+    half_only=True: skip the right-side wheels/wheelhouses entirely. The
+    floor still spans the full width (the floor builder doesn't have a
+    half-mode), but the right-side wheelhouse cuts are skipped, so a
+    downstream y=0 slice produces the same result as the left half of a
+    full build (minus the right-wheelhouse-cut artefacts that don't
+    matter on the left side).
 
     Returns (Assembly, layout dict).
     """
     spec = spec or UnderbodySpec()
     layout = _compute_layout(spec)
-    print(f"[layout] {layout}")
+    print(f"[layout] {layout}  half_only={half_only}")
+    sides = ("left",) if half_only else ("left", "right")
 
-    print("[wheels] building wheels via wheel_assem ...")
+    print(f"[wheels] building wheels via wheel_assem ... (sides={sides})")
     front_wheel = assemble_wheel(spec.wheel)
     tire_radius_f = spec.wheel.tire_radius_mm
     tire_width_f = spec.wheel.tire_section_width_mm
@@ -228,6 +254,7 @@ def build_underbody(spec: Optional[UnderbodySpec] = None):
         spec, layout,
         tire_radius_f, tire_width_f,
         tire_radius_r, tire_width_r,
+        sides=sides,
     )
     wh_solids = [(s, build_wheelhouse_solid(s)) for s in wh_specs]
 
@@ -259,32 +286,22 @@ def build_underbody(spec: Optional[UnderbodySpec] = None):
             -spec.floor_angle_deg,
         )
 
-    print("[wheels] placing 4 corners ...")
+    print(f"[wheels] placing {2 * len(sides)} corners ...")
+    all_wheels = [
+        ("wheel_fl", "left",  layout["front_axle_x"], spec.track_front_mm,
+         spec.camber_front_deg, spec.toe_front_deg, front_wheel, tire_radius_f),
+        ("wheel_fr", "right", layout["front_axle_x"], spec.track_front_mm,
+         spec.camber_front_deg, spec.toe_front_deg, front_wheel, tire_radius_f),
+        ("wheel_rl", "left",  layout["rear_axle_x"], spec.track_rear_mm,
+         spec.camber_rear_deg, spec.toe_rear_deg, rear_wheel, tire_radius_r),
+        ("wheel_rr", "right", layout["rear_axle_x"], spec.track_rear_mm,
+         spec.camber_rear_deg, spec.toe_rear_deg, rear_wheel, tire_radius_r),
+    ]
     wheels = [
-        ("wheel_fl", _place_wheel(front_wheel, side="left",
-                                    axle_x=layout["front_axle_x"],
-                                    track=spec.track_front_mm,
-                                    camber_deg=spec.camber_front_deg,
-                                    toe_deg=spec.toe_front_deg,
-                                    tire_radius=tire_radius_f)),
-        ("wheel_fr", _place_wheel(front_wheel, side="right",
-                                    axle_x=layout["front_axle_x"],
-                                    track=spec.track_front_mm,
-                                    camber_deg=spec.camber_front_deg,
-                                    toe_deg=spec.toe_front_deg,
-                                    tire_radius=tire_radius_f)),
-        ("wheel_rl", _place_wheel(rear_wheel, side="left",
-                                    axle_x=layout["rear_axle_x"],
-                                    track=spec.track_rear_mm,
-                                    camber_deg=spec.camber_rear_deg,
-                                    toe_deg=spec.toe_rear_deg,
-                                    tire_radius=tire_radius_r)),
-        ("wheel_rr", _place_wheel(rear_wheel, side="right",
-                                    axle_x=layout["rear_axle_x"],
-                                    track=spec.track_rear_mm,
-                                    camber_deg=spec.camber_rear_deg,
-                                    toe_deg=spec.toe_rear_deg,
-                                    tire_radius=tire_radius_r)),
+        (name, _place_wheel(wp, side=side, axle_x=ax, track=tr,
+                             camber_deg=ca, toe_deg=to, tire_radius=trd))
+        for (name, side, ax, tr, ca, to, wp, trd) in all_wheels
+        if side in sides
     ]
 
     print("[assemble] body + 4 wheels ...")
