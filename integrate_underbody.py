@@ -184,41 +184,65 @@ def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
     return hints
 
 
-def diffuser_angle_from_hints(hints: dict) -> float:
-    """Pick a diffuser ramp angle so the trailing edge of the diffuser
-    sits at the shell's actual rear-edge bottom — i.e. the lowest shell
-    vertex within a small band of the rearmost x. This places the diffuser
-    exit flush with the bumper TIP, not the much lower point at the
-    underside of the body well in front of the bumper.
+def measure_shell_anchors(shell_mm: trimesh.Trimesh, ys: list[float],
+                          y_band: float = 25.0,
+                          edge_band: float = 50.0) -> dict:
+    """Probe the shell at each y_target in ``ys`` and record the front
+    (smallest x_shell) and rear (largest x_shell) edges plus the lowest
+    Z within ``edge_band`` mm of each extremity. Used as anchors for the
+    splitter leading edges and the diffuser trailing edges.
 
-    Rise needed = rear_edge_min_z - ride_height.
-    Run available = rear_overhang_mm (distance from rear axle to body tail).
-    angle = atan2(rise, run)  (in degrees), clamped to [0°, 25°].
+    The shell is symmetric in y, so we accept vertices at either +y or -y.
+
+    Returns ``{y_target: {y_target, front_x_shell, front_z_shell,
+    rear_x_shell, rear_z_shell}}`` — all in the shell frame (mm).
     """
-    rise = max(0.0, hints["rear_edge_min_z_mm"] - hints["ride_height_mm"])
-    run = max(1.0, hints["rear_overhang_mm"])
-    angle = degrees(atan2(rise, run))
-    angle = float(np.clip(angle, 0.0, 25.0))
-    print(f"[diffuser] rear-edge z={hints['rear_edge_min_z_mm']:.1f} mm  "
-          f"ride_height={hints['ride_height_mm']:.1f} mm  → "
-          f"rise={rise:.1f} mm  run={run:.1f} mm  →  angle={angle:.2f}°")
-    return angle
+    verts = np.asarray(shell_mm.vertices)
+    out: dict[float, dict] = {}
+    for y in ys:
+        near = (np.abs(verts[:, 1] - y) < y_band) | \
+               (np.abs(verts[:, 1] + y) < y_band)
+        band = verts[near]
+        if len(band) == 0:
+            raise ValueError(
+                f"no shell vertices within y_band={y_band} mm of Y={y}")
+        x_min = float(band[:, 0].min())
+        x_max = float(band[:, 0].max())
+        front = band[band[:, 0] < x_min + edge_band]
+        rear = band[band[:, 0] > x_max - edge_band]
+        out[y] = {
+            "y_target": float(y),
+            "front_x_shell": x_min,
+            "front_z_shell": float(front[:, 2].min()),
+            "rear_x_shell": x_max,
+            "rear_z_shell": float(rear[:, 2].min()),
+        }
+        a = out[y]
+        print(f"[anchor] Y={y:>5.0f}  "
+              f"front (x,z)=({a['front_x_shell']:>7.1f}, "
+              f"{a['front_z_shell']:>6.1f})  "
+              f"rear (x,z)=({a['rear_x_shell']:>7.1f}, "
+              f"{a['rear_z_shell']:>6.1f})")
+    return out
 
 
-def lateral_clearance_overrides(hints: dict) -> dict:
+def lateral_clearance_overrides(hints: dict,
+                                 extra_extend_mm: float = 0.0) -> dict:
     """Per-wheel lateral_clearance for the wheelhouse so its outboard
-    edge reaches the shell's rocker line at that wheel.
+    edge reaches the shell's rocker line at that wheel (plus an optional
+    ``extra_extend_mm`` margin so the arch overshoots the rocker — the
+    boundary trim clips it back).
 
     The wheelhouse arch is symmetric in y about y_track with half-length
     = (tire_width + 2 * lateral_clearance) / 2 = tire_width/2 +
-    lateral_clearance. So to make the outboard edge land at the shell's
-    outboard rocker y (= ``wheel_outboard_y``), we need:
+    lateral_clearance. So to make the outboard edge land at
+    ``wheel_outboard_y + extra_extend_mm``, we need:
 
-        lateral_clearance = wheel_outboard_y - track/2 - tire_width/2
+        lateral_clearance = (wheel_outboard_y + extra_extend_mm)
+                            − track/2 − tire_width/2
 
-    Inboard side is extended symmetrically (the wheelhouse builder
-    doesn't support per-side asymmetry) — typically this just makes the
-    inboard wall slightly wider, which is harmless against the floor.
+    Inboard side extends symmetrically (the wheelhouse builder doesn't
+    support per-side asymmetry) — typically harmless against the floor.
     """
     overrides: dict[tuple[str, str], float] = {}
     track_half = hints["track_mm"] / 2.0
@@ -227,13 +251,15 @@ def lateral_clearance_overrides(hints: dict) -> dict:
         outboard = hints["wheel_outboard_y_mm"].get(axle_label)
         if outboard is None:
             continue
-        need = max(0.0, outboard - track_half - tire_half)
-        # Add a small margin so the wheelhouse fully reaches the rocker.
+        target_y = outboard + extra_extend_mm
+        need = max(0.0, target_y - track_half - tire_half)
+        # Add a small margin so the wheelhouse fully reaches the target.
         need += 5.0
         overrides[(axle_label, "left")] = need
         overrides[(axle_label, "right")] = need
-        print(f"[wheelhouse] {axle_label}: shell rocker y={outboard:.0f}  "
-              f"→ lateral_clearance={need:.1f} mm  "
+        print(f"[wheelhouse] {axle_label}: rocker y={outboard:.0f}  "
+              f"+extend {extra_extend_mm:.0f}  →  target y={target_y:.0f}  "
+              f"→  lateral_clearance={need:.1f} mm  "
               f"(track/2={track_half:.0f}, tire_half={tire_half:.0f})")
     return overrides
 
@@ -242,45 +268,115 @@ def lateral_clearance_overrides(hints: dict) -> dict:
 # Spec construction
 # ---------------------------------------------------------------------------
 
-def build_spec(hints: dict, diffuser_angle: float,
-                lat_overrides: dict | None = None):
-    """Construct an UnderbodySpec from the shell-derived hints."""
-    from paramub import UnderbodySpec, WheelSpec, TireSpec, SpokeSpec
+def build_spec(hints: dict, anchors: dict,
+                lat_overrides: dict | None = None,
+                *,
+                y_intermediate: float = 700.0,
+                length_extend_mm: float = 100.0,
+                width_extend_mm: float = 100.0,
+                splitter_kick_offset_mm: float = 50.0,
+                diffuser_kick_offset_mm: float = 50.0,
+                splitter_front_angle_deg: float = -30.0,
+                diffuser_rear_angle_deg: float = 5.0,
+                handle_strength: float = 0.30):
+    """Build an UnderbodySpec with multisection splitter + diffuser
+    Bezier lofts pinned to the shell's measured front/rear edges.
 
-    # Tire: hit target OD + section width while keeping the standard
-    # 25.4*rim_in + 2*sidewall = OD relation. We pick rim_diameter_in to
-    # land aspect_ratio in a plausible band (30..70). 18" rim is a safe
-    # starting point for ~640 mm OD with section width ~245 mm.
+    Sections per face:
+        Y = 0                 (centerline)
+        Y = y_intermediate    (≈ rocker line; measured anchor)
+        Y = y_outboard        (= max(y_intermediate, body_half) + width_extend
+                                — same shape as the intermediate section so
+                                the surface stays constant outboard until
+                                the boundary trim clips it back to the body)
+
+    Splitter leading edge at (Y=0, Y=y_intermediate) is placed at the
+    shell-measured front-edge bottom + ``length_extend_mm`` further
+    forward. Same on the diffuser at the rear.
+
+    Splitter kick = front_axle + ``splitter_kick_offset_mm`` (forward).
+    Diffuser kick = rear_axle − ``diffuser_kick_offset_mm`` (rearward).
+    """
+    from paramub import (
+        UnderbodySpec, WheelSpec, TireSpec, SpokeSpec,
+        SplitterSection, DiffuserSection,
+    )
+
+    # ---- Tire / spoke (unchanged) -------------------------------------
     target_od = hints["tire_od_mm"]
     target_sw = hints["tire_width_mm"]
-    # section_width chosen to match the extracted axial width. Aspect ratio
-    # is then forced by (target_od/2 - rim_radius_mm) / section_width * 100.
     rim_in = 18.0
     rim_r = rim_in * 25.4 / 2.0
     aspect = max(25.0, min(75.0,
                             (target_od / 2.0 - rim_r) / target_sw * 100.0))
-    # Re-derive section width so OD lands exactly on target.
     section_w = (target_od / 2.0 - rim_r) / (aspect / 100.0)
-
     tire = TireSpec(
         section_width_mm=section_w,
         aspect_ratio=aspect,
         rim_diameter_in=rim_in,
-        # Crown radius must satisfy crown_radius > tread_width/2 + 5; clamp.
         tread_width_mm=max(60.0, 0.85 * target_sw),
         crown_radius_mm=max(0.85 * target_sw / 2 + 50.0, 0.6 * target_od),
-        # Cosmetic tire features at reasonable defaults.
         sidewall_bulge_mm=6.0,
         shoulder_radius_mm=20.0,
         rim_flange_mm=14.0,
     )
-
-    # Spoke: keep light; the user explicitly said no need to extract.
     spoke = SpokeSpec(
         wheel_width_mm=target_sw,
         rim_diameter_in=rim_in,
         num_spokes=5,
     )
+
+    # ---- Bezier sections from shell anchors ---------------------------
+    midpoint_x = hints["midpoint_x_shell_mm"]
+    front_axle_x = +hints["wheelbase_mm"] / 2.0
+    rear_axle_x = -hints["wheelbase_mm"] / 2.0
+    splitter_kick_x = front_axle_x + splitter_kick_offset_mm
+    diffuser_kick_x = rear_axle_x - diffuser_kick_offset_mm
+
+    def shell_x_to_paramub_x(x_shell: float) -> float:
+        return midpoint_x - x_shell
+
+    body_half = hints["floor_width_mm"] / 2.0
+    y_outboard = max(y_intermediate, body_half) + width_extend_mm
+    floor_width = 2.0 * y_outboard
+    print(f"[spec] y_intermediate={y_intermediate:.0f}  "
+          f"body_half={body_half:.0f}  width_extend={width_extend_mm:.0f}  "
+          f"→  y_outboard={y_outboard:.0f}  floor_width={floor_width:.0f}")
+
+    def splitter_at(y_anchor: float, y_mm: float) -> SplitterSection:
+        a = anchors[y_anchor]
+        return SplitterSection(
+            y_mm=y_mm,
+            kick_x_mm=splitter_kick_x,
+            front_x_mm=shell_x_to_paramub_x(a["front_x_shell"]) + length_extend_mm,
+            front_z_mm=a["front_z_shell"],
+            front_angle_deg=splitter_front_angle_deg,
+            start_strength=handle_strength,
+            end_strength=handle_strength,
+        )
+
+    def diffuser_at(y_anchor: float, y_mm: float) -> DiffuserSection:
+        a = anchors[y_anchor]
+        return DiffuserSection(
+            y_mm=y_mm,
+            kick_x_mm=diffuser_kick_x,
+            rear_x_mm=shell_x_to_paramub_x(a["rear_x_shell"]) - length_extend_mm,
+            rear_z_mm=a["rear_z_shell"],
+            rear_angle_deg=diffuser_rear_angle_deg,
+            start_strength=handle_strength,
+            end_strength=handle_strength,
+        )
+
+    splitter_sections = [
+        splitter_at(0.0, 0.0),
+        splitter_at(y_intermediate, y_intermediate),
+        splitter_at(y_intermediate, y_outboard),   # outboard = copy of intermediate
+    ]
+    diffuser_sections = [
+        diffuser_at(0.0, 0.0),
+        diffuser_at(y_intermediate, y_intermediate),
+        diffuser_at(y_intermediate, y_outboard),
+    ]
 
     spec = UnderbodySpec(
         wheelbase_mm=hints["wheelbase_mm"],
@@ -289,15 +385,13 @@ def build_spec(hints: dict, diffuser_angle: float,
         track_front_mm=hints["track_mm"],
         track_rear_mm=hints["track_mm"],
         ride_height_mm=hints["ride_height_mm"],
-        floor_width_mm=hints["floor_width_mm"],
-        diffuser_angle_deg=diffuser_angle,
-        diffuser_radius_mm=min(250.0, 0.4 * hints["rear_overhang_mm"]),
+        floor_width_mm=floor_width,
+        splitter_sections=splitter_sections,
+        diffuser_sections=diffuser_sections,
         wheel_house_axial_clearance_mm=20.0,
         wheel_house_lateral_clearance_mm=25.0,
-        front_steering_clearance_mm=0.0,    # we don't model steering
+        front_steering_clearance_mm=0.0,
         rear_steering_clearance_mm=0.0,
-        front_wheel_house_fillet_mm=30.0,
-        rear_wheel_house_fillet_mm=30.0,
         camber_front_deg=0.0,
         camber_rear_deg=0.0,
         toe_front_deg=0.0,
@@ -658,9 +752,13 @@ def main():
     )
 
     hints = extract_hints(shell, meta, scale)
-    diffuser_angle = diffuser_angle_from_hints(hints)
-    lat_overrides = lateral_clearance_overrides(hints)
-    spec = build_spec(hints, diffuser_angle, lat_overrides=lat_overrides)
+    # Measure shell front/rear edges at the section Y values used to anchor
+    # the splitter and diffuser Bezier lofts.
+    anchors = measure_shell_anchors(shell_mm, ys=[0.0, 700.0])
+    # Wheelhouses extend +100mm past the rocker line so the boundary trim
+    # has material to clip against the body silhouette.
+    lat_overrides = lateral_clearance_overrides(hints, extra_extend_mm=100.0)
+    spec = build_spec(hints, anchors, lat_overrides=lat_overrides)
 
     print("\n[paramub] build_underbody (half_only=True) ...")
     from paramub.ub_assem import build_underbody
@@ -725,7 +823,7 @@ def main():
     # Dump hints + final spec for debugging.
     debug_meta = {
         "hints": hints,
-        "diffuser_angle_deg": diffuser_angle,
+        "shell_anchors": anchors,
         "spec": _spec_to_jsonable(spec),
         "layout": layout,
         "underbody_paramub_frame_faces": int(len(ub_raw.faces)),
