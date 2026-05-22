@@ -144,7 +144,7 @@ spec = UnderbodySpec(
     front_steering_clearance_mm      = 150.0,   # extra Y on front arches
     rear_steering_clearance_mm       = 0.0,
     front_wheel_house_fillet_mm      = 100.0,   # inboard cap fillet R
-    rear_wheel_house_fillet_mm       = 30.0,
+    rear_wheel_house_fillet_mm       = 100.0,
 
     # ----- wheel alignment --------------------------------------------
     camber_front_deg   = -1.5,      # -ve = top of wheel inward

@@ -105,7 +105,7 @@ class UnderbodySpec:
     front_steering_clearance_mm: float = 150.0
     rear_steering_clearance_mm: float = 0.0
     front_wheel_house_fillet_mm: float = 100.0
-    rear_wheel_house_fillet_mm: float = 30.0
+    rear_wheel_house_fillet_mm: float = 100.0
 
     # alignment
     camber_front_deg: float = -1.5
