@@ -343,28 +343,65 @@ def build_spec(hints: dict, anchors: dict,
           f"body_half={body_half:.0f}  width_extend={width_extend_mm:.0f}  "
           f"→  y_outboard={y_outboard:.0f}  floor_width={floor_width:.0f}")
 
+    ride_h = hints["ride_height_mm"]
+
+    def _safe_end_strength(end_x: float, end_z: float, kick_x: float,
+                            angle_deg: float, request: float,
+                            label: str, y_mm: float) -> float:
+        """Cap end_strength so the cubic Bezier's P2 control point stays
+        above ride_h (the flat floor). With t3 having a positive Z
+        component (curve heading away from the floor at the endpoint),
+        P2 = P3 − end_strength · chord · t3 drops in Z. If P2 drops
+        below ride_h the curve typically dips below the floor between
+        kick and endpoint."""
+        import math
+        chord = math.hypot(end_x - kick_x, end_z - ride_h)
+        sin_a = math.sin(math.radians(angle_deg))
+        if sin_a <= 1e-6:
+            return request                       # tangent has no Z component
+        margin = 5.0
+        # P2.z = P3.z − end_strength · chord · sin_a  ≥  ride_h + margin
+        max_safe = max(0.05, (end_z - ride_h - margin) / (chord * sin_a))
+        if request > max_safe:
+            print(f"[strength] {label} Y={y_mm:.0f}: end_strength "
+                  f"{request:.3f} → {max_safe:.3f} "
+                  f"(request would dip P2 below floor)")
+        return min(request, max_safe)
+
     def splitter_at(y_anchor: float, y_mm: float) -> SplitterSection:
         a = anchors[y_anchor]
+        front_x = shell_x_to_paramub_x(a["front_x_shell"]) + length_extend_mm
+        end_str = _safe_end_strength(
+            front_x, a["front_z_shell"], splitter_kick_x,
+            splitter_front_angle_deg, handle_strength,
+            "splitter", y_mm)
         return SplitterSection(
             y_mm=y_mm,
             kick_x_mm=splitter_kick_x,
-            front_x_mm=shell_x_to_paramub_x(a["front_x_shell"]) + length_extend_mm,
+            front_x_mm=front_x,
             front_z_mm=a["front_z_shell"],
             front_angle_deg=splitter_front_angle_deg,
             start_strength=handle_strength,
-            end_strength=handle_strength,
+            end_strength=end_str,
         )
 
     def diffuser_at(y_anchor: float, y_mm: float) -> DiffuserSection:
         a = anchors[y_anchor]
+        rear_x = shell_x_to_paramub_x(a["rear_x_shell"]) - length_extend_mm
+        # _safe_end_strength uses |end_x − kick_x| via hypot, so it works
+        # for either direction (diffuser kick > rear, splitter kick < front).
+        end_str = _safe_end_strength(
+            rear_x, a["rear_z_shell"], diffuser_kick_x,
+            diffuser_rear_angle_deg, handle_strength,
+            "diffuser", y_mm)
         return DiffuserSection(
             y_mm=y_mm,
             kick_x_mm=diffuser_kick_x,
-            rear_x_mm=shell_x_to_paramub_x(a["rear_x_shell"]) - length_extend_mm,
+            rear_x_mm=rear_x,
             rear_z_mm=a["rear_z_shell"],
             rear_angle_deg=diffuser_rear_angle_deg,
             start_strength=handle_strength,
-            end_strength=handle_strength,
+            end_strength=end_str,
         )
 
     splitter_sections = [
@@ -468,6 +505,83 @@ def keep_left_half(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 # Perimeter trim: drop underbody faces whose xy is far from the shell xy
 # ---------------------------------------------------------------------------
 
+def extract_shell_boundary_loops_3d(
+        shell_mm: trimesh.Trimesh, min_points: int = 10,
+        ignore_y_eps: float = 5.0) -> list[np.ndarray]:
+    """Connected loops of open boundary edges of the shell mesh, as 3D
+    polylines (Nx3 arrays). One loop per element of the returned list.
+
+    These trace the shell's actual edges in 3D — outer body silhouette,
+    wheelhouse openings, etc. — and go UP around features instead of
+    being flattened to z=0 like the XY hull.
+
+    Loops that lie entirely on the y=0 symmetry plane (the artificial
+    cut from the half-shell) are filtered out.
+    """
+    sh = trimesh.Trimesh(
+        vertices=shell_mm.vertices.copy(),
+        faces=shell_mm.faces.copy(),
+        process=True)
+    outline = sh.outline()
+    loops: list[np.ndarray] = []
+    if outline is None or not hasattr(outline, "entities"):
+        return loops
+    for entity in outline.entities:
+        try:
+            pts = entity.discrete(outline.vertices)
+        except Exception:
+            continue
+        if pts is None or len(pts) < min_points:
+            continue
+        pts = np.asarray(pts, dtype=np.float64)
+        if (np.abs(pts[:, 1]) < ignore_y_eps).all():
+            continue       # artificial y=0 cut
+        loops.append(pts)
+    return loops
+
+
+def export_loops_as_curtain_stl(loops: list[np.ndarray], out_path: Path,
+                                 height: float = 10.0) -> None:
+    """Each 3D loop becomes a thin vertical curtain (the loop polyline
+    extruded DOWN by ``height`` mm in Z). The result is a single STL of
+    all loops, visible in 3D viewers alongside the shell + underbody so
+    the trim boundary can be inspected exactly where it lives in 3D —
+    including up around the wheel arches."""
+    all_v = []
+    all_f = []
+    off = 0
+    for loop in loops:
+        if len(loop) < 3:
+            continue
+        n = len(loop)
+        top = loop.copy()
+        bot = loop.copy()
+        bot[:, 2] -= height
+        verts = np.vstack([top, bot])
+        faces = []
+        for i in range(n - 1):
+            faces.append([i, i + 1, i + n + 1])
+            faces.append([i, i + n + 1, i + n])
+        # Close the loop if its first/last vertex differ noticeably
+        if not np.allclose(loop[0], loop[-1], atol=1.0):
+            faces.append([n - 1, 0, n])
+            faces.append([n - 1, n, 2 * n - 1])
+        all_v.append(verts)
+        all_f.append(np.asarray(faces, dtype=np.int64) + off)
+        off += 2 * n
+    if not all_v:
+        print(f"[boundary 3D] no loops to export to {out_path}")
+        return
+    mesh = trimesh.Trimesh(
+        vertices=np.vstack(all_v),
+        faces=np.vstack(all_f),
+        process=False)
+    mesh.export(str(out_path), file_type="stl")
+    print(f"[boundary 3D] wrote {out_path}  "
+          f"({len(loops)} loops, {len(mesh.faces)} triangles, "
+          f"curtain height={height:.0f}mm)")
+
+
 def extract_outer_boundary_polygon(shell_mm: trimesh.Trimesh,
                                      ignore_y_eps: float = 5.0,
                                      concave_ratio: float = 0.02):
@@ -531,6 +645,107 @@ def extract_outer_boundary_polygon(shell_mm: trimesh.Trimesh,
         return clipped
     print("[boundary] hull came back empty; falling back to convex hull")
     return mp.convex_hull
+
+
+def _loop_to_polygon(loop_3d: np.ndarray, min_area: float = 100.0):
+    """Project a 3D polyline to XY and try to build a shapely Polygon.
+    trimesh.outline() returns open chains (first/last point not matched);
+    we close the chain manually and use ``buffer(0)`` to clean up small
+    self-intersections."""
+    from shapely.geometry import Polygon
+
+    xy = loop_3d[:, :2]
+    if len(xy) < 4:
+        return None
+    if not np.allclose(xy[0], xy[-1]):
+        xy = np.vstack([xy, xy[:1]])
+    try:
+        p = Polygon(xy)
+    except Exception:
+        return None
+    if not p.is_valid:
+        p = p.buffer(0)
+        if p.is_empty:
+            return None
+        if p.geom_type == "MultiPolygon":
+            p = max(p.geoms, key=lambda g: g.area)
+        if p.geom_type != "Polygon":
+            return None
+    if p.area < min_area:
+        return None
+    return p
+
+
+def boundary_polygon_with_holes(shell_mm: trimesh.Trimesh,
+                                 loops3d: list[np.ndarray] | None = None,
+                                 ignore_y_eps: float = 5.0,
+                                 min_hole_area: float = 5000.0):
+    """Build a 2D polygon WITH HOLES from the shell's 3D open-edge loops.
+
+    Largest projected loop = exterior body silhouette.
+    Smaller loops contained within the exterior = holes (wheelhouse
+    openings, etc.).
+
+    Returns a shapely Polygon (potentially with holes), clipped to y ≤ 0
+    to match the left-half underbody. None if no usable loops.
+    """
+    from shapely.geometry import Polygon, box
+    from shapely import affinity
+    from shapely.ops import unary_union
+
+    if loops3d is None:
+        loops3d = extract_shell_boundary_loops_3d(
+            shell_mm, ignore_y_eps=ignore_y_eps)
+
+    polys = []
+    for loop in loops3d:
+        p = _loop_to_polygon(loop)
+        if p is not None:
+            polys.append(p)
+    print(f"[boundary] {len(polys)}/{len(loops3d)} loops → valid polygons")
+    if not polys:
+        return None
+
+    polys.sort(key=lambda p: p.area, reverse=True)
+    outer_half = polys[0]
+    # Mirror exterior across y=0 so the boundary covers both halves;
+    # we clip back to y≤0 at the end.
+    outer_mirror = affinity.scale(outer_half, xfact=1, yfact=-1, origin=(0, 0))
+    outer_full = unary_union([outer_half, outer_mirror]).buffer(0)
+    if outer_full.geom_type != "Polygon":
+        # MultiPolygon — pick the largest piece
+        outer_full = max(outer_full.geoms, key=lambda g: g.area)
+
+    holes = []
+    for p in polys[1:]:
+        if p.area < min_hole_area:
+            continue
+        if not outer_full.contains(p):
+            continue
+        holes.append(p)
+        # Mirror the hole too so the full-car polygon has both wheel arches
+        p_mirror = affinity.scale(p, xfact=1, yfact=-1, origin=(0, 0))
+        if outer_full.contains(p_mirror):
+            holes.append(p_mirror)
+
+    exterior_coords = list(outer_full.exterior.coords)
+    hole_coords = [list(h.exterior.coords) for h in holes]
+    poly_with_holes = Polygon(exterior_coords, hole_coords)
+
+    # Clip to y ≤ 0
+    b = poly_with_holes.bounds
+    clip = box(b[0] - 100, b[1] - 100, b[2] + 100, 0.0)
+    clipped = poly_with_holes.intersection(clip)
+    if clipped.is_empty:
+        clipped = poly_with_holes
+    if clipped.geom_type == "MultiPolygon":
+        clipped = max(clipped.geoms, key=lambda g: g.area)
+
+    n_holes = len(clipped.interiors) if hasattr(clipped, "interiors") else 0
+    print(f"[boundary] polygon-with-holes: outer area={outer_full.area:.0f} "
+          f"mm², {len(holes)} holes (post-mirror), "
+          f"clipped area={clipped.area:.0f} mm² ({n_holes} holes after y≤0 clip)")
+    return clipped
 
 
 def trim_to_shell_boundary(underbody: trimesh.Trimesh,
@@ -856,20 +1071,36 @@ def main():
     # what the user wanted ("project the shell EDGE onto the UB") than
     # the previous full-mesh ray-up test, which kept floor area under
     # the hood/trunk that extended beyond the body's lower silhouette.
-    boundary = extract_outer_boundary_polygon(shell_mm)
     base_for_debug = args.shell_meta.stem.replace("_meta", "")
-    # Top-down debug PNG.
+    # Extract the shell's 3D open-edge loops for visualisation. trimesh
+    # breaks the outer silhouette into chained fragments at the wheel
+    # arches, so a single closed outer loop isn't directly available —
+    # the 2D trim polygon below still comes from the concave hull of
+    # all open-edge endpoints, which handles the broken outer cleanly.
+    loops3d = extract_shell_boundary_loops_3d(shell_mm)
+    print(f"[boundary] {len(loops3d)} open-edge loops in 3D")
+    # 3D curtain STL — the actual shell edges in 3D, going up around
+    # the wheel arches / following the rocker line / etc. Open this
+    # alongside the underbody STL in Blender to see the trim boundary
+    # in its true 3D location.
+    export_loops_as_curtain_stl(
+        loops3d,
+        args.output_dir / f"{base_for_debug}_boundary_3d.stl",
+        height=10.0,
+    )
+    # 2D trim polygon: concave hull of open-edge endpoints (handles the
+    # broken outer chain by sampling all points). The UB already gets
+    # wheelhouse openings from build_wheelhouse_solid, so we don't need
+    # holes here for the wheel arches — the outer silhouette alone is
+    # what drives the trim.
+    boundary = extract_outer_boundary_polygon(shell_mm)
     _dump_boundary_debug(
         shell_mm, boundary,
         args.output_dir / f"{base_for_debug}_boundary.png")
-    # 3D extruded polygon as STL so it can be inspected alongside the
-    # shell + underbody. Sits at z=0 (just above the ground) by default.
     export_boundary_polygon_stl(
         boundary,
-        args.output_dir / f"{base_for_debug}_boundary.stl",
-        z_base=0.0,
-        z_height=5.0,
-    )
+        args.output_dir / f"{base_for_debug}_boundary_xy.stl",
+        z_base=0.0, z_height=5.0)
     ub_trim = trim_to_shell_boundary(ub_left, boundary)
     print(f"[trim]  faces={len(ub_trim.faces):,}  "
           f"y range=({ub_trim.bounds[0,1]:.1f}, {ub_trim.bounds[1,1]:.1f})")
