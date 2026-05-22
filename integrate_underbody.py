@@ -105,14 +105,32 @@ Splitter / diffuser geometry tunables (build_spec keyword args)
 Outputs (in ``--output-dir``)
 =============================
 
-  <stem>_underbody_left.stl     trimmed parametric UB in shell frame.
-  <stem>_combined_left.stl      shell + UB concatenated.
+The UB is split into three independent meshes — the body (floor +
+wheelhouses, sliced + trimmed) and the wheels (rigid bodies, transformed
+only). The combined-body STL is closed at y=0 (both shell and body are
+sliced with ``cap=True``).
+
+  <stem>_combined_body.stl      shell (left half + y=0 cap) + UB body
+                                (left half + y=0 cap, trimmed to shell
+                                silhouette). Approximately closed.
+  <stem>_body.stl               UB body only (floor + wheelhouses),
+                                without the shell. Already trimmed and
+                                capped.
+  <stem>_wheel_front_left.stl   front-left wheel (rigid; transformed
+                                into shell frame, no slice / trim).
+  <stem>_wheel_rear_left.stl    rear-left wheel.
+  (<stem>_wheel_front_right /   only present when half_only=False
+   _rear_right.stl)             (full-car mode).
+
+Debug:
+
   <stem>_boundary_3d.stl        shell open-edge loops as 10 mm curtains.
   <stem>_boundary_xy.stl        2D trim polygon as a thin extruded wall.
   <stem>_boundary.png           top-down debug of the trim polygon.
   <stem>_combined.png           10-panel debug render of shell + UB.
   <stem>_underbody_only.png     10-panel debug render of UB alone.
-  <stem>_integrate_meta.json    hints, anchors, spec, face counts.
+  <stem>_integrate_meta.json    hints, anchors, spec, face counts,
+                                output file paths.
 
 Usage::
 
@@ -352,7 +370,7 @@ def build_spec(hints: dict, anchors: dict,
                 lat_overrides: dict | None = None,
                 *,
                 y_intermediate: float = 700.0,
-                length_extend_mm: float = 100.0,
+                length_extend_mm: float = 0.0,
                 width_extend_mm: float = 100.0,
                 splitter_kick_offset_mm: float = 50.0,
                 diffuser_kick_offset_mm: float = 50.0,
@@ -569,16 +587,37 @@ def subdivide_to_edge(mesh: trimesh.Trimesh, max_edge: float) -> trimesh.Trimesh
     return out
 
 
-def keep_left_half(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Slice at y = 0 and keep y <= 0."""
+def keep_left_half(mesh: trimesh.Trimesh, cap: bool = False) -> trimesh.Trimesh:
+    """Slice at y = 0 and keep y <= 0. If ``cap`` is True, the cut is
+    triangulated so the resulting mesh is approximately closed at the
+    y=0 plane (useful for the combined shell + UB body output)."""
     cut = trimesh.intersections.slice_mesh_plane(
         mesh,
         plane_normal=np.array([0.0, -1.0, 0.0]),
         plane_origin=np.array([0.0, 0.0, 0.0]),
-        cap=False,
+        cap=cap,
     )
     cut.face_normals = None
     return cut
+
+
+def cq_obj_to_trimesh_via_stl(cq_obj, stl_tmp: Path,
+                               tolerance: float = 0.1,
+                               angular_tolerance: float = 0.1
+                               ) -> trimesh.Trimesh:
+    """Export a single CadQuery object (Workplane / Shape / Assembly child
+    ``.obj``) to STL and load as trimesh. Wraps it in a one-child
+    Assembly for the cq.exporters API."""
+    import cadquery as cq
+    from cadquery import exporters
+    sub = cq.Assembly()
+    sub.add(cq_obj, name="part")
+    compound = sub.toCompound()
+    exporters.export(compound, str(stl_tmp),
+                      exporters.ExportTypes.STL,
+                      tolerance=tolerance,
+                      angularTolerance=angular_tolerance)
+    return trimesh.load(str(stl_tmp), force="mesh", process=False)
 
 
 # ---------------------------------------------------------------------------
@@ -829,7 +868,8 @@ def boundary_polygon_with_holes(shell_mm: trimesh.Trimesh,
 
 
 def trim_to_shell_boundary(underbody: trimesh.Trimesh,
-                            boundary_polygon) -> trimesh.Trimesh:
+                            boundary_polygon,
+                            buffer_mm: float = 5.0) -> trimesh.Trimesh:
     """Trim UB faces against the shell's outer boundary polygon (xy).
 
     Uses an ALL-VERTICES test: a face is kept only when all three of its
@@ -837,6 +877,13 @@ def trim_to_shell_boundary(underbody: trimesh.Trimesh,
     centroid test — it prevents large faces from straddling the boundary
     with the centroid inside but corners poking past. Combine with a
     fine subdivision (small ``max_edge``) for a sharp trim.
+
+    The polygon is buffered OUTWARD by ``buffer_mm`` (default 5 mm)
+    before the test, so:
+        - splitter / diffuser endpoints that sit exactly on the body
+          silhouette are not dropped as "on the boundary";
+        - the y=0 cap vertices (which lie on the polygon's y=0 edge)
+          survive the test.
     """
     try:
         from shapely import contains_xy
@@ -845,9 +892,11 @@ def trim_to_shell_boundary(underbody: trimesh.Trimesh,
     if not hasattr(boundary_polygon, "geom_type"):
         keep = np.ones(len(underbody.faces), dtype=bool)
     else:
+        test_polygon = (boundary_polygon.buffer(buffer_mm)
+                         if buffer_mm > 0 else boundary_polygon)
         verts_xy = underbody.vertices[:, :2]
         vert_inside = contains_xy(
-            boundary_polygon, verts_xy[:, 0], verts_xy[:, 1])
+            test_polygon, verts_xy[:, 0], verts_xy[:, 1])
         keep = vert_inside[underbody.faces].all(axis=1)
     keep_idx = np.flatnonzero(keep)
     print(f"[trim] boundary-polygon (all-verts inside) -> keep "
@@ -1116,6 +1165,25 @@ def main():
     lat_overrides = lateral_clearance_overrides(hints, extra_extend_mm=100.0)
     spec = build_spec(hints, anchors, lat_overrides=lat_overrides)
 
+    # Diagnostic: print splitter / diffuser endpoint positions in BOTH
+    # frames so the user can sanity-check where the curves terminate
+    # relative to the shell's measured anchors.
+    midpoint_x = hints["midpoint_x_shell_mm"]
+    if spec.splitter_sections:
+        print("[splitter endpoints]")
+        for s in spec.splitter_sections:
+            x_shell = midpoint_x - s.front_x_mm
+            print(f"  Y={s.y_mm:>5.0f}  paramub front=({s.front_x_mm:>7.1f}, "
+                  f"{s.front_z_mm:>6.1f})  → shell=({x_shell:>7.1f}, "
+                  f"{s.front_z_mm:>6.1f})")
+    if spec.diffuser_sections:
+        print("[diffuser endpoints]")
+        for s in spec.diffuser_sections:
+            x_shell = midpoint_x - s.rear_x_mm
+            print(f"  Y={s.y_mm:>5.0f}  paramub rear=({s.rear_x_mm:>7.1f}, "
+                  f"{s.rear_z_mm:>6.1f})  → shell=({x_shell:>7.1f}, "
+                  f"{s.rear_z_mm:>6.1f})")
+
     print("\n[paramub] build_underbody (half_only=True) ...")
     from paramub.ub_assem import build_underbody
     asy, layout = build_underbody(spec, half_only=True)
@@ -1125,102 +1193,139 @@ def main():
     scratch = args.output_dir / "_scratch"
     scratch.mkdir(parents=True, exist_ok=True)
 
-    # Export the raw assembly STL (still in ParamUB frame).
-    raw_stl = scratch / "underbody_paramub_frame.stl"
-    ub_raw = cq_to_trimesh_via_stl(asy, raw_stl)
-    print(f"[paramub] STL faces={len(ub_raw.faces):,}")
+    # Split the assembly: body (floor + wheelhouses) is processed through
+    # subdivide / align / slice / trim; wheels are rigid bodies that get
+    # only the align transform (no slice, no boundary trim). This lets
+    # us emit the combined-body STL (shell + UB body, capped at y=0) and
+    # per-wheel STLs as separate files.
+    body_cq = None
+    wheels_cq: dict[str, object] = {}
+    for child in asy.children:
+        if child.name == "body":
+            body_cq = child.obj
+        else:
+            wheels_cq[child.name] = child.obj
+    if body_cq is None:
+        raise RuntimeError("Assembly has no child named 'body'")
 
-    # CadQuery's STL emits 2-3 giant triangles for the central flat floor.
-    # Subdivide before slicing/trimming so the y=0 cut is clean and the
-    # perimeter trim's per-face check is meaningful.
+    # ---- body: subdivide → align → slice(cap=True) → trim --------------
+    body_raw_stl = scratch / "body_paramub.stl"
+    body_raw = cq_obj_to_trimesh_via_stl(body_cq, body_raw_stl)
+    print(f"[body raw] faces={len(body_raw.faces):,}")
     # Finer = sharper boundary trim (no large triangle straddling the
     # polygon boundary). 25 mm gives a clean cut for the rocker / wheel
     # arch features without blowing up face count too much.
     max_edge = 25.0
     print(f"[subdivide] target edge ≤ {max_edge:.0f} mm ...")
-    ub_dense = subdivide_to_edge(ub_raw, max_edge=max_edge)
-    print(f"[subdivide] faces: {len(ub_raw.faces):,} → {len(ub_dense.faces):,}")
+    body_dense = subdivide_to_edge(body_raw, max_edge=max_edge)
+    print(f"[subdivide] body faces: {len(body_raw.faces):,} → "
+          f"{len(body_dense.faces):,}")
+    body_aligned = align_to_shell_frame(body_dense, midpoint_x)
+    body_left = keep_left_half(body_aligned, cap=True)
+    print(f"[body left+cap]  faces={len(body_left.faces):,}  "
+          f"y range=({body_left.bounds[0,1]:.1f}, {body_left.bounds[1,1]:.1f})")
 
-    # Transform to shell frame, take left half, trim perimeter.
-    ub_aligned = align_to_shell_frame(ub_dense, hints["midpoint_x_shell_mm"])
-    ub_left = keep_left_half(ub_aligned)
-    print(f"[left]  faces={len(ub_left.faces):,}  "
-          f"y range=({ub_left.bounds[0,1]:.1f}, {ub_left.bounds[1,1]:.1f})")
-    # Build a polygon from the shell's outer open-boundary loop and
-    # trim UB faces whose centroid xy lies outside it. This is closer to
-    # what the user wanted ("project the shell EDGE onto the UB") than
-    # the previous full-mesh ray-up test, which kept floor area under
-    # the hood/trunk that extended beyond the body's lower silhouette.
-    base_for_debug = args.shell_meta.stem.replace("_meta", "")
-    # Extract the shell's 3D open-edge loops for visualisation. trimesh
-    # breaks the outer silhouette into chained fragments at the wheel
-    # arches, so a single closed outer loop isn't directly available —
-    # the 2D trim polygon below still comes from the concave hull of
-    # all open-edge endpoints, which handles the broken outer cleanly.
+    # ---- boundary extraction (uses full shell) -------------------------
+    base = args.shell_meta.stem.replace("_meta", "")
+    # 3D open-edge loops for the boundary curtain STL.
     loops3d = extract_shell_boundary_loops_3d(shell_mm)
     print(f"[boundary] {len(loops3d)} open-edge loops in 3D")
-    # 3D curtain STL — the actual shell edges in 3D, going up around
-    # the wheel arches / following the rocker line / etc. Open this
-    # alongside the underbody STL in Blender to see the trim boundary
-    # in its true 3D location.
     export_loops_as_curtain_stl(
         loops3d,
-        args.output_dir / f"{base_for_debug}_boundary_3d.stl",
+        args.output_dir / f"{base}_boundary_3d.stl",
         height=10.0,
     )
-    # 2D trim polygon: concave hull of open-edge endpoints (handles the
-    # broken outer chain by sampling all points). The UB already gets
-    # wheelhouse openings from build_wheelhouse_solid, so we don't need
-    # holes here for the wheel arches — the outer silhouette alone is
-    # what drives the trim.
+    # 2D trim polygon: concave hull of all open-edge endpoints (mirrored,
+    # clipped to y≤0).
     boundary = extract_outer_boundary_polygon(shell_mm)
     _dump_boundary_debug(
         shell_mm, boundary,
-        args.output_dir / f"{base_for_debug}_boundary.png")
+        args.output_dir / f"{base}_boundary.png")
     export_boundary_polygon_stl(
         boundary,
-        args.output_dir / f"{base_for_debug}_boundary_xy.stl",
+        args.output_dir / f"{base}_boundary_xy.stl",
         z_base=0.0, z_height=5.0)
-    ub_trim = trim_to_shell_boundary(ub_left, boundary)
-    print(f"[trim]  faces={len(ub_trim.faces):,}  "
-          f"y range=({ub_trim.bounds[0,1]:.1f}, {ub_trim.bounds[1,1]:.1f})")
+    # Trim body — polygon buffered outward by 5 mm so splitter endpoints
+    # exactly at the silhouette and the y=0 cap vertices are not dropped
+    # as "on the boundary".
+    body_trim = trim_to_shell_boundary(body_left, boundary, buffer_mm=5.0)
+    print(f"[body trim]  faces={len(body_trim.faces):,}  "
+          f"y range=({body_trim.bounds[0,1]:.1f}, {body_trim.bounds[1,1]:.1f})")
 
-    base = args.shell_meta.stem.replace("_meta", "")
-    out_ub_stl = args.output_dir / f"{base}_underbody_left.stl"
-    out_combined_stl = args.output_dir / f"{base}_combined_left.stl"
-    out_render = args.output_dir / f"{base}_combined.png"
+    # ---- wheels: align only (no slice, no trim) ------------------------
+    wheel_meshes: dict[str, trimesh.Trimesh] = {}
+    for name, cq_obj in wheels_cq.items():
+        w_stl = scratch / f"{name}_paramub.stl"
+        w_raw = cq_obj_to_trimesh_via_stl(cq_obj, w_stl)
+        w_aligned = align_to_shell_frame(w_raw, midpoint_x)
+        wheel_meshes[name] = w_aligned
+        print(f"[wheel] {name:<10s} faces={len(w_aligned.faces):,}  "
+              f"y range=({w_aligned.bounds[0,1]:.1f}, "
+              f"{w_aligned.bounds[1,1]:.1f})")
 
-    ub_trim.export(str(out_ub_stl), file_type="stl")
-    print(f"[out] {out_ub_stl}")
+    # ---- shell: slice at y=0 with cap so combined body is closed ------
+    shell_left = keep_left_half(shell_mm, cap=True)
+    print(f"[shell left+cap] faces={len(shell_left.faces):,}  "
+          f"y range=({shell_left.bounds[0,1]:.1f}, {shell_left.bounds[1,1]:.1f})")
 
-    combined = trimesh.util.concatenate([shell_mm, ub_trim])
-    combined.export(str(out_combined_stl), file_type="stl")
-    print(f"[out] {out_combined_stl}")
+    # ---- outputs --------------------------------------------------------
+    combined_body = trimesh.util.concatenate([shell_left, body_trim])
+    out_combined = args.output_dir / f"{base}_combined_body.stl"
+    combined_body.export(str(out_combined), file_type="stl")
+    print(f"[out] {out_combined}  ({len(combined_body.faces):,} faces)")
 
+    out_body = args.output_dir / f"{base}_body.stl"
+    body_trim.export(str(out_body), file_type="stl")
+    print(f"[out] {out_body}  ({len(body_trim.faces):,} faces)")
+
+    WHEEL_NAME_MAP = {
+        "wheel_fl": "front_left",  "wheel_fr": "front_right",
+        "wheel_rl": "rear_left",   "wheel_rr": "rear_right",
+    }
+    wheel_out_paths: dict[str, str] = {}
+    for name, mesh in wheel_meshes.items():
+        short = WHEEL_NAME_MAP.get(name, name)
+        out_wheel = args.output_dir / f"{base}_wheel_{short}.stl"
+        mesh.export(str(out_wheel), file_type="stl")
+        wheel_out_paths[name] = str(out_wheel)
+        print(f"[out] {out_wheel}  ({len(mesh.faces):,} faces)")
+
+    # ---- debug renders --------------------------------------------------
     if not args.no_render:
+        # Render: pass the (full) shell + body+wheels concatenated so the
+        # iso views show the complete assembly.
+        ub_for_render = trimesh.util.concatenate(
+            [body_trim, *wheel_meshes.values()])
+        out_render = args.output_dir / f"{base}_combined.png"
         try:
-            render_combined(shell_mm, ub_trim, out_render, scratch)
+            render_combined(shell_left, ub_for_render, out_render, scratch)
             print(f"[out] {out_render}")
         except Exception as exc:
             print(f"[warn] render_combined failed: {exc}")
         out_render_ub = args.output_dir / f"{base}_underbody_only.png"
         try:
-            render_underbody_only(ub_trim, out_render_ub, scratch)
+            render_underbody_only(ub_for_render, out_render_ub, scratch)
             print(f"[out] {out_render_ub}")
         except Exception as exc:
             print(f"[warn] render_underbody_only failed: {exc}")
 
-    # Dump hints + final spec for debugging.
+    # ---- meta dump ------------------------------------------------------
     debug_meta = {
         "hints": hints,
         "shell_anchors": anchors,
         "spec": _spec_to_jsonable(spec),
         "layout": layout,
-        "underbody_paramub_frame_faces": int(len(ub_raw.faces)),
-        "underbody_left_faces": int(len(ub_left.faces)),
-        "underbody_trimmed_faces": int(len(ub_trim.faces)),
-        "out_underbody_stl": str(out_ub_stl),
-        "out_combined_stl": str(out_combined_stl),
+        "body_raw_faces": int(len(body_raw.faces)),
+        "body_dense_faces": int(len(body_dense.faces)),
+        "body_left_faces": int(len(body_left.faces)),
+        "body_trim_faces": int(len(body_trim.faces)),
+        "shell_left_faces": int(len(shell_left.faces)),
+        "combined_body_faces": int(len(combined_body.faces)),
+        "wheels": {name: {"faces": int(len(m.faces))}
+                    for name, m in wheel_meshes.items()},
+        "out_combined_body_stl": str(out_combined),
+        "out_body_stl": str(out_body),
+        "out_wheel_stls": wheel_out_paths,
     }
     (args.output_dir / f"{base}_integrate_meta.json").write_text(
         json.dumps(debug_meta, indent=2, default=float))
