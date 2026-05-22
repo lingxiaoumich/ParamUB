@@ -276,7 +276,7 @@ def build_spec(hints: dict, anchors: dict,
                 width_extend_mm: float = 100.0,
                 splitter_kick_offset_mm: float = 50.0,
                 diffuser_kick_offset_mm: float = 50.0,
-                splitter_front_angle_deg: float = -30.0,
+                splitter_front_angle_deg: float = +30.0,
                 diffuser_rear_angle_deg: float = 5.0,
                 handle_strength: float = 0.30):
     """Build an UnderbodySpec with multisection splitter + diffuser
@@ -470,7 +470,7 @@ def keep_left_half(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 
 def extract_outer_boundary_polygon(shell_mm: trimesh.Trimesh,
                                      ignore_y_eps: float = 5.0,
-                                     concave_ratio: float = 0.04):
+                                     concave_ratio: float = 0.02):
     """Build a closed polygon (in xy) that traces the outer lower
     silhouette of the shell. We:
 
@@ -535,20 +535,29 @@ def extract_outer_boundary_polygon(shell_mm: trimesh.Trimesh,
 
 def trim_to_shell_boundary(underbody: trimesh.Trimesh,
                             boundary_polygon) -> trimesh.Trimesh:
-    """Trim UB faces whose centroid xy lies outside the shell's outer
-    boundary polygon (projected to xy)."""
+    """Trim UB faces against the shell's outer boundary polygon (xy).
+
+    Uses an ALL-VERTICES test: a face is kept only when all three of its
+    vertices' (x, y) lie inside the polygon. This is stricter than a
+    centroid test — it prevents large faces from straddling the boundary
+    with the centroid inside but corners poking past. Combine with a
+    fine subdivision (small ``max_edge``) for a sharp trim.
+    """
     try:
         from shapely import contains_xy
     except ImportError:
         from shapely.vectorized import contains as contains_xy
-    centroids = underbody.vertices[underbody.faces].mean(axis=1)
-    if hasattr(boundary_polygon, "geom_type"):
-        keep = contains_xy(boundary_polygon, centroids[:, 0], centroids[:, 1])
+    if not hasattr(boundary_polygon, "geom_type"):
+        keep = np.ones(len(underbody.faces), dtype=bool)
     else:
-        keep = np.ones(len(centroids), dtype=bool)
+        verts_xy = underbody.vertices[:, :2]
+        vert_inside = contains_xy(
+            boundary_polygon, verts_xy[:, 0], verts_xy[:, 1])
+        keep = vert_inside[underbody.faces].all(axis=1)
     keep_idx = np.flatnonzero(keep)
-    print(f"[trim] boundary-polygon  -> keep {int(keep.sum()):,}/"
-          f"{len(keep):,} faces (dropped {int((~keep).sum()):,})")
+    print(f"[trim] boundary-polygon (all-verts inside) -> keep "
+          f"{int(keep.sum()):,}/{len(keep):,} faces "
+          f"(dropped {int((~keep).sum()):,})")
     if len(keep_idx) == 0:
         # nothing kept — return an empty trimesh to avoid crashing the rest
         return trimesh.Trimesh(vertices=underbody.vertices[:0],
@@ -558,6 +567,46 @@ def trim_to_shell_boundary(underbody: trimesh.Trimesh,
     if isinstance(kept, list):
         kept = kept[0]
     return kept
+
+
+def export_boundary_polygon_stl(polygon, out_path: Path,
+                                 z_base: float = 0.0,
+                                 z_height: float = 5.0) -> None:
+    """Save the 2D boundary polygon as a thin extruded WALL STL so it
+    can be inspected in 3D viewers next to the shell + underbody.
+
+    The wall sits between z=z_base and z=z_base + z_height (no top or
+    bottom caps — those would require a 2D triangulation engine that
+    isn't always available in this env). The wall traces the polygon's
+    exterior, which is what matters for visual inspection of the trim
+    boundary."""
+    if not hasattr(polygon, "exterior"):
+        print(f"[boundary STL] polygon has no exterior; skipping {out_path}")
+        return
+    coords = np.array(polygon.exterior.coords)
+    if len(coords) >= 2 and np.allclose(coords[0], coords[-1]):
+        coords = coords[:-1]
+    n = len(coords)
+    if n < 3:
+        print(f"[boundary STL] polygon has <3 unique points; skipping")
+        return
+    bottom = np.column_stack(
+        [coords[:, 0], coords[:, 1], np.full(n, z_base)])
+    top = np.column_stack(
+        [coords[:, 0], coords[:, 1], np.full(n, z_base + z_height)])
+    verts = np.vstack([bottom, top])
+    faces = []
+    for i in range(n):
+        j = (i + 1) % n
+        # Two triangles per edge.
+        faces.append([i, j, j + n])
+        faces.append([i, j + n, i + n])
+    mesh = trimesh.Trimesh(
+        vertices=verts, faces=np.array(faces, dtype=np.int64), process=False)
+    mesh.export(str(out_path), file_type="stl")
+    print(f"[boundary STL] wrote {out_path}  "
+          f"({len(coords)} polygon points; wall at "
+          f"z=[{z_base:.1f}, {z_base + z_height:.1f}])")
 
 
 def trim_to_shell_footprint(underbody: trimesh.Trimesh,
@@ -595,7 +644,11 @@ RENDER_FACE_BUDGET = 30_000
 
 def _decimate_subproc(src_stl: Path, dst_stl: Path, target_faces: int) -> None:
     """PyVista decimate in a subprocess (PyVista / matplotlib are happier
-    not loaded in the same interpreter as cadquery)."""
+    not loaded in the same interpreter as cadquery).
+
+    Uses decimate_pro for high-ratio reductions (>= 0.9) since
+    vtkDecimatePro handles extreme ratios more robustly than vtkDecimate.
+    """
     code = """
 import sys
 import pyvista as pv
@@ -605,7 +658,15 @@ n = mesh.n_cells
 if n <= target:
     mesh.save(dst, binary=True)
 else:
-    mesh.decimate(1.0 - target / float(n)).save(dst, binary=True)
+    ratio = 1.0 - target / float(n)
+    if ratio >= 0.9:
+        try:
+            out = mesh.decimate_pro(ratio, preserve_topology=False)
+        except Exception:
+            out = mesh.decimate(min(ratio, 0.95))
+    else:
+        out = mesh.decimate(ratio)
+    out.save(dst, binary=True)
 """
     cmd = [sys.executable, "-c", code, str(src_stl), str(dst_stl), str(target_faces)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -777,7 +838,10 @@ def main():
     # CadQuery's STL emits 2-3 giant triangles for the central flat floor.
     # Subdivide before slicing/trimming so the y=0 cut is clean and the
     # perimeter trim's per-face check is meaningful.
-    max_edge = 60.0
+    # Finer = sharper boundary trim (no large triangle straddling the
+    # polygon boundary). 25 mm gives a clean cut for the rocker / wheel
+    # arch features without blowing up face count too much.
+    max_edge = 25.0
     print(f"[subdivide] target edge ≤ {max_edge:.0f} mm ...")
     ub_dense = subdivide_to_edge(ub_raw, max_edge=max_edge)
     print(f"[subdivide] faces: {len(ub_raw.faces):,} → {len(ub_dense.faces):,}")
@@ -793,10 +857,19 @@ def main():
     # the previous full-mesh ray-up test, which kept floor area under
     # the hood/trunk that extended beyond the body's lower silhouette.
     boundary = extract_outer_boundary_polygon(shell_mm)
-    # Dump the boundary polygon as a small debug PNG so we can see what
-    # the trim is actually using.
-    _dump_boundary_debug(shell_mm, boundary,
-                         args.output_dir / f"{args.shell_meta.stem.replace('_meta', '')}_boundary.png")
+    base_for_debug = args.shell_meta.stem.replace("_meta", "")
+    # Top-down debug PNG.
+    _dump_boundary_debug(
+        shell_mm, boundary,
+        args.output_dir / f"{base_for_debug}_boundary.png")
+    # 3D extruded polygon as STL so it can be inspected alongside the
+    # shell + underbody. Sits at z=0 (just above the ground) by default.
+    export_boundary_polygon_stl(
+        boundary,
+        args.output_dir / f"{base_for_debug}_boundary.stl",
+        z_base=0.0,
+        z_height=5.0,
+    )
     ub_trim = trim_to_shell_boundary(ub_left, boundary)
     print(f"[trim]  faces={len(ub_trim.faces):,}  "
           f"y range=({ub_trim.bounds[0,1]:.1f}, {ub_trim.bounds[1,1]:.1f})")
@@ -814,11 +887,17 @@ def main():
     print(f"[out] {out_combined_stl}")
 
     if not args.no_render:
-        render_combined(shell_mm, ub_trim, out_render, scratch)
-        print(f"[out] {out_render}")
+        try:
+            render_combined(shell_mm, ub_trim, out_render, scratch)
+            print(f"[out] {out_render}")
+        except Exception as exc:
+            print(f"[warn] render_combined failed: {exc}")
         out_render_ub = args.output_dir / f"{base}_underbody_only.png"
-        render_underbody_only(ub_trim, out_render_ub, scratch)
-        print(f"[out] {out_render_ub}")
+        try:
+            render_underbody_only(ub_trim, out_render_ub, scratch)
+            print(f"[out] {out_render_ub}")
+        except Exception as exc:
+            print(f"[warn] render_underbody_only failed: {exc}")
 
     # Dump hints + final spec for debugging.
     debug_meta = {
