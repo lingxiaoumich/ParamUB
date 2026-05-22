@@ -64,11 +64,28 @@
   <code>DiffuserSection</code> instances. Each section defines the
   diffuser's profile in the XZ plane at one Y position. The builder
   auto-mirrors sections at <code>y_mm &gt; 0</code> across Y=0 and lofts
-  through all sections to produce a single continuous floor+diffuser
-  surface. When set, the legacy
+  through all sections. When set, the legacy
   <code>diffuser_angle_deg</code> / <code>diffuser_radius_mm</code> are
   ignored.
 </p>
+<p>
+  The mirror feature exists for the front splitter:
+  <code>FloorSpec.splitter_sections</code> /
+  <code>UnderbodySpec.splitter_sections</code> takes a list of
+  <code>SplitterSection</code> instances. It is the same construction at
+  the front of the car (with <code>kick_x</code> and
+  <code>front_x</code> instead of <code>rear_x</code>, and start tangent
+  along <strong>+X</strong> instead of −X).
+</p>
+<div class="callout info">
+  <strong>Independent N and Y.</strong> Splitter and diffuser are built
+  as independent lofts and sewn to the flat-floor face at their
+  (auto-extracted) kickline edges. The two lists can have different
+  numbers of sections and different <code>y_mm</code> values. The only
+  required match is the outermost <code>y_mm</code>: both lists' largest
+  Y must equal <code>floor_width/2</code> so each loft reaches the
+  floor's lateral edge.
+</div>
 <div class="callout info">
   <strong>Tangency.</strong> Every Bezier starts with its first handle
   pointing horizontally along −X (toward the rear), so the curve is

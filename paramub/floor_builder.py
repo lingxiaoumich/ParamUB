@@ -126,6 +126,48 @@ class DiffuserSection:
 
 
 @dataclass
+class SplitterSection:
+    """One cubic-Bezier cross-section of the front splitter at a given Y.
+
+    Mirror of :class:`DiffuserSection` at the front of the car::
+
+        P0 = (kick_x_mm,  y_mm, ride_h)            # on the flat floor
+        P3 = (front_x_mm, y_mm, front_z_mm)        # front endpoint
+        t0 = (+1, 0, 0)                            # tangent to floor, +X
+        t3 = (+cos(α), 0, +sin(α))                 # in XZ at angle α
+        start_strength, end_strength               # normalised handle lengths
+
+    where ``α = radians(front_angle_deg)``. Positive ``front_angle_deg``
+    lifts the splitter away from the ground at the leading edge;
+    negative dips it toward the ground. ``front_z_mm`` can be anywhere
+    (above, equal to, or below ``ride_h``) — pair it with
+    ``front_angle_deg`` to shape leading-edge behaviour.
+
+    Sections at ``y_mm > 0`` are auto-mirrored across Y=0.
+    """
+    y_mm: float
+    kick_x_mm: float
+    front_x_mm: float
+    front_z_mm: float
+    front_angle_deg: float
+    start_strength: float
+    end_strength: float
+
+    def __post_init__(self) -> None:
+        if self.front_x_mm <= self.kick_x_mm:
+            raise ValueError(
+                f"SplitterSection: front_x_mm ({self.front_x_mm}) must be "
+                f"> kick_x_mm ({self.kick_x_mm}) — splitter runs forward.")
+        if self.front_z_mm < 0.0:
+            raise ValueError(
+                f"SplitterSection: front_z_mm ({self.front_z_mm}) must be >= 0.")
+        if self.start_strength < 0.0 or self.end_strength < 0.0:
+            raise ValueError(
+                "SplitterSection: start_strength and end_strength "
+                "must be >= 0.")
+
+
+@dataclass
 class FloorSpec:
     """Plan + diffuser + ride-height parameters for the underbody surface.
 
@@ -150,8 +192,18 @@ class FloorSpec:
         diffuser_sections:         list of DiffuserSection at y_mm >= 0.
                                    If set, the legacy fields are ignored
                                    and the diffuser is built as a Bezier
-                                   loft between the (mirrored, padded)
-                                   sections.
+                                   loft between the mirrored sections.
+
+    Splitter (multisection)
+        splitter_sections:         list of SplitterSection at y_mm >= 0.
+                                   Optional front-of-car analogue of
+                                   diffuser_sections.
+
+    When either splitter_sections or diffuser_sections is set, the
+    surface becomes a sewn Shell of (splitter face?) + flat floor face +
+    (diffuser face?), with kickline edges shared via boundary extraction
+    so the three pieces are C1-continuous at the kicklines. Splitter and
+    diffuser can have independent N and Y values.
     """
     floor_x_min: float
     floor_x_max: float
@@ -164,11 +216,12 @@ class FloorSpec:
     diffuser_radius_mm: float = 500.0
 
     diffuser_sections: Optional[list[DiffuserSection]] = None
+    splitter_sections: Optional[list[SplitterSection]] = None
 
     def validate(self) -> None:
         if self.floor_x_max <= self.floor_x_min:
             raise ValueError("floor_x_max must be > floor_x_min")
-        if self.diffuser_sections is None:
+        if self.diffuser_sections is None and self.splitter_sections is None:
             if self.diffuser_start_x_mm is not None:
                 if self.diffuser_start_x_mm <= self.floor_x_min:
                     raise ValueError(
@@ -176,30 +229,63 @@ class FloorSpec:
                         "(otherwise the diffuser has zero length)")
             return
         # Multisection validation.
-        secs = self.diffuser_sections
-        if len(secs) < 1:
-            raise ValueError(
-                "diffuser_sections must contain at least one section.")
-        for s in secs:
-            if s.y_mm < 0.0:
+        y_half = self.floor_width_mm / 2.0
+        if self.diffuser_sections is not None:
+            _validate_sections_list(
+                self.diffuser_sections, "diffuser_sections", y_half)
+            for s in self.diffuser_sections:
+                if s.kick_x_mm >= self.floor_x_max:
+                    raise ValueError(
+                        f"DiffuserSection.kick_x_mm ({s.kick_x_mm}) must be "
+                        f"< floor_x_max ({self.floor_x_max}).")
+        if self.splitter_sections is not None:
+            _validate_sections_list(
+                self.splitter_sections, "splitter_sections", y_half)
+            for s in self.splitter_sections:
+                if s.kick_x_mm <= self.floor_x_min:
+                    raise ValueError(
+                        f"SplitterSection.kick_x_mm ({s.kick_x_mm}) must be "
+                        f"> floor_x_min ({self.floor_x_min}).")
+        # If both sets are present, the flat-floor middle region must be
+        # non-empty: every splitter kick must be in front of every diffuser
+        # kick. (Per-Y check would be stricter; this coarse check catches
+        # the obviously-broken case.)
+        if (self.splitter_sections is not None
+                and self.diffuser_sections is not None):
+            min_split_kick = min(s.kick_x_mm for s in self.splitter_sections)
+            max_diff_kick = max(s.kick_x_mm for s in self.diffuser_sections)
+            if min_split_kick <= max_diff_kick:
                 raise ValueError(
-                    f"DiffuserSection.y_mm ({s.y_mm}) must be >= 0 — "
-                    "sections at y > 0 are auto-mirrored across Y=0.")
-        if not any(s.y_mm > 0.0 for s in secs):
+                    "Splitter and diffuser kicklines overlap or invert: "
+                    f"min(splitter.kick_x)={min_split_kick} must be "
+                    f"> max(diffuser.kick_x)={max_diff_kick} so the flat "
+                    "floor between them has positive extent.")
+
+
+def _validate_sections_list(secs: list, name: str, y_half: float) -> None:
+    """Common validation for splitter_sections / diffuser_sections."""
+    if len(secs) < 1:
+        raise ValueError(f"{name} must contain at least one section.")
+    for s in secs:
+        if s.y_mm < 0.0:
             raise ValueError(
-                "diffuser_sections must contain at least one section with "
-                "y_mm > 0 (so auto-mirroring produces a real second "
-                "section).")
-        ys = [s.y_mm for s in secs]
-        if ys != sorted(ys) or len(set(ys)) != len(ys):
-            raise ValueError(
-                "diffuser_sections must be sorted by y_mm ascending with "
-                "no duplicate y values.")
-        for s in secs:
-            if s.kick_x_mm >= self.floor_x_max:
-                raise ValueError(
-                    f"DiffuserSection.kick_x_mm ({s.kick_x_mm}) must be "
-                    f"< floor_x_max ({self.floor_x_max}).")
+                f"{type(s).__name__}.y_mm ({s.y_mm}) must be >= 0 — "
+                "sections at y > 0 are auto-mirrored across Y=0.")
+    if not any(s.y_mm > 0.0 for s in secs):
+        raise ValueError(
+            f"{name} must contain at least one section with y_mm > 0 "
+            "(so auto-mirroring produces a real second section).")
+    ys = [s.y_mm for s in secs]
+    if ys != sorted(ys) or len(set(ys)) != len(ys):
+        raise ValueError(
+            f"{name} must be sorted by y_mm ascending with no "
+            "duplicate y values.")
+    outer_y = max(ys)
+    if abs(outer_y - y_half) > 0.01:
+        raise ValueError(
+            f"{name}'s outermost y_mm ({outer_y}) must equal floor_width/2 "
+            f"({y_half}) — the splitter/diffuser must reach the floor edge "
+            "for the flat-floor boundary to be well-defined.")
 
 
 def _diff_geometry(spec: FloorSpec):
@@ -263,9 +349,10 @@ def build_floor_surface(spec: FloorSpec):
 
 
 def build_floor(spec: FloorSpec):
-    """Return the zero-thickness underbody Face (legacy) or Compound (multisection)."""
+    """Return the zero-thickness underbody Face (legacy) or sewn Shell
+    (multisection — when splitter_sections and/or diffuser_sections are set)."""
     spec.validate()
-    if spec.diffuser_sections is None:
+    if spec.diffuser_sections is None and spec.splitter_sections is None:
         return build_floor_surface(spec)
     return build_floor_multisection(spec)
 
@@ -279,7 +366,7 @@ def build_below_cropper(spec: FloorSpec):
     just like the legacy form.
     """
     spec.validate()
-    if spec.diffuser_sections is None:
+    if spec.diffuser_sections is None and spec.splitter_sections is None:
         return _build_below_cropper_legacy(spec)
     return _build_below_cropper_multisection(spec)
 
@@ -308,84 +395,201 @@ def _build_below_cropper_legacy(spec: FloorSpec):
 
 
 # =====================================================================
-# Multisection (Bezier loft) diffuser
+# Multisection (Bezier loft) splitter + diffuser
 # =====================================================================
+#
+# When splitter_sections and/or diffuser_sections are provided, the
+# floor is built as a sewn Shell of up to three faces:
+#
+#   splitter face  →  flat floor face  →  diffuser face
+#
+# Each Bezier loft is built independently, then its kickline edge (the
+# rail along the loft's u=0 boundary, which lies at z=ride_h) is
+# extracted and reused as part of the flat-floor face's boundary. Using
+# the extracted edges directly guarantees the shell sews cleanly and
+# tangent-continuously at the kicklines (both lofts start with horizontal
+# tangent in X, and the flat floor is horizontal everywhere).
 
 
-def _section_bezier_edge(sec: DiffuserSection, ride_h: float) -> cq.Edge:
-    """Build one section's Bezier edge by delegating to the Layer-2 wrapper.
+from dataclasses import replace
 
-    Encodes the diffuser's special-case constraints: P0 on the floor,
-    start tangent along -X, end tangent in the XZ plane at
-    ``rear_angle_deg`` above -X.
-    """
+
+def _diffuser_bezier_edge(sec: DiffuserSection, ride_h: float) -> cq.Edge:
+    """One diffuser section's Bezier (kick → rear)."""
     a = radians(sec.rear_angle_deg)
     p0 = cq.Vector(sec.kick_x_mm, sec.y_mm, ride_h)
     p3 = cq.Vector(sec.rear_x_mm, sec.y_mm, sec.rear_z_mm)
     t0 = cq.Vector(-1.0, 0.0, 0.0)
     t3 = cq.Vector(-cos(a), 0.0, sin(a))
     return cubic_bezier_from_tangents(
-        p0, p3, t0, t3,
-        sec.start_strength, sec.end_strength,
-    )
+        p0, p3, t0, t3, sec.start_strength, sec.end_strength)
 
 
-def _expand_sections(user_secs: list[DiffuserSection]) -> list[DiffuserSection]:
-    """Auto-mirror y>0 sections across Y=0."""
-    mirrored = [
-        DiffuserSection(
-            y_mm=-s.y_mm,
-            kick_x_mm=s.kick_x_mm,
-            rear_x_mm=s.rear_x_mm,
-            rear_z_mm=s.rear_z_mm,
-            rear_angle_deg=s.rear_angle_deg,
-            start_strength=s.start_strength,
-            end_strength=s.end_strength,
-        )
-        for s in user_secs if s.y_mm > 0.0
-    ]
+def _splitter_bezier_edge(sec: SplitterSection, ride_h: float) -> cq.Edge:
+    """One splitter section's Bezier (kick → front)."""
+    a = radians(sec.front_angle_deg)
+    p0 = cq.Vector(sec.kick_x_mm, sec.y_mm, ride_h)
+    p3 = cq.Vector(sec.front_x_mm, sec.y_mm, sec.front_z_mm)
+    t0 = cq.Vector(+1.0, 0.0, 0.0)
+    t3 = cq.Vector(+cos(a), 0.0, sin(a))
+    return cubic_bezier_from_tangents(
+        p0, p3, t0, t3, sec.start_strength, sec.end_strength)
+
+
+def _mirror_sections(user_secs: list) -> list:
+    """Auto-mirror y>0 sections across Y=0, return sorted by y_mm."""
+    mirrored = [replace(s, y_mm=-s.y_mm) for s in user_secs if s.y_mm > 0.0]
     return sorted([*user_secs, *mirrored], key=lambda s: s.y_mm)
 
 
-def _section_wire(sec: DiffuserSection, floor_x_max: float, ride_h: float):
-    """Open wire: floor_x_max -> kick (flat) -> Bezier -> rear endpoint,
-    all at sec.y_mm. This is the full underbody underside profile at this Y."""
-    p0 = cq.Vector(sec.kick_x_mm, sec.y_mm, ride_h)
-    front_pt = cq.Vector(floor_x_max, sec.y_mm, ride_h)
-    flat_edge = cq.Edge.makeLine(front_pt, p0)
-    bezier_edge = _section_bezier_edge(sec, ride_h)
-    return cq.Wire.assembleEdges([flat_edge, bezier_edge])
-
-
-def _loft_section_wires(wires, ruled: bool):
-    """Loft a list of open wires into a Shell/Face via BRepOffsetAPI_ThruSections."""
+def _loft_section_edges(edges: list, ruled: bool):
+    """Loft section edges into a Face/Shell via BRepOffsetAPI_ThruSections."""
     from OCP.BRepOffsetAPI import BRepOffsetAPI_ThruSections
     builder = BRepOffsetAPI_ThruSections(False, ruled)  # isSolid=False
-    for w in wires:
-        builder.AddWire(w.wrapped)
+    for e in edges:
+        wire = cq.Wire.assembleEdges([e])
+        builder.AddWire(wire.wrapped)
     builder.Build()
     return cq.Shape.cast(builder.Shape())
 
 
-def build_floor_multisection(spec: FloorSpec):
-    """Single Face/Shell: each section's full XZ profile (flat + Bezier)
-    swept laterally across Y via a loft. No joint between flat and diffuser."""
-    secs = _expand_sections(spec.diffuser_sections)
+def _extract_kickline_edge(loft_shape, secs, ride_h, tol=0.5) -> cq.Edge:
+    """Find the kickline edge of a loft: the rail at u=0 whose endpoints
+    match the first and last sections' kick points (P0)."""
+    p_first = cq.Vector(secs[0].kick_x_mm, secs[0].y_mm, ride_h)
+    p_last = cq.Vector(secs[-1].kick_x_mm, secs[-1].y_mm, ride_h)
+    for edge in loft_shape.Edges():
+        verts = edge.Vertices()
+        if len(verts) != 2:
+            continue
+        e0, e1 = verts[0].Center(), verts[1].Center()
+        m_fwd = max((e0 - p_first).Length, (e1 - p_last).Length)
+        m_rev = max((e1 - p_first).Length, (e0 - p_last).Length)
+        if min(m_fwd, m_rev) < tol:
+            return edge
+    raise RuntimeError(
+        f"kickline edge not found in loft (expected endpoints "
+        f"{p_first.toTuple()} and {p_last.toTuple()})")
+
+
+def _kickline_vertex(edge: cq.Edge, y_target: float, tol=0.5) -> cq.Vector:
+    """Endpoint Vector of edge whose Y coordinate is closest to y_target."""
+    best = None
+    best_d = float("inf")
+    for v in edge.Vertices():
+        c = v.Center()
+        d = abs(c.y - y_target)
+        if d < best_d:
+            best_d = d
+            best = c
+    if best is None or best_d > tol:
+        raise RuntimeError(
+            f"no kickline-edge endpoint near y={y_target} (closest was {best_d})")
+    return best
+
+
+def _build_splitter_face(spec: FloorSpec):
+    """Loft the splitter sections; return (face, kickline_edge)."""
+    secs = _mirror_sections(spec.splitter_sections)
     ride_h = spec.ride_height_mm
-    section_wires = [_section_wire(s, spec.floor_x_max, ride_h) for s in secs]
-    ruled = len(section_wires) == 2
-    return _loft_section_wires(section_wires, ruled=ruled)
+    edges = [_splitter_bezier_edge(s, ride_h) for s in secs]
+    face = _loft_section_edges(edges, ruled=(len(edges) == 2))
+    kickline = _extract_kickline_edge(face, secs, ride_h)
+    return face, kickline, secs
+
+
+def _build_diffuser_face(spec: FloorSpec):
+    """Loft the diffuser sections; return (face, kickline_edge)."""
+    secs = _mirror_sections(spec.diffuser_sections)
+    ride_h = spec.ride_height_mm
+    edges = [_diffuser_bezier_edge(s, ride_h) for s in secs]
+    face = _loft_section_edges(edges, ruled=(len(edges) == 2))
+    kickline = _extract_kickline_edge(face, secs, ride_h)
+    return face, kickline, secs
+
+
+def _build_flat_floor_face(splitter_kickline, diffuser_kickline,
+                            floor_x_max, floor_x_min, y_half, ride_h):
+    """Planar Face at z=ride_h, bounded by the (possibly-extracted)
+    splitter and diffuser kickline edges plus side and rear/front lines.
+
+    Reusing the extracted kickline Edge objects ensures the downstream
+    sew of splitter+flat+diffuser produces a watertight Shell.
+    """
+    edges = []
+    # Front (splitter kickline, or straight line at floor_x_max).
+    if splitter_kickline is not None:
+        edges.append(splitter_kickline)
+        front_neg = _kickline_vertex(splitter_kickline, -y_half)
+        front_pos = _kickline_vertex(splitter_kickline, +y_half)
+    else:
+        front_neg = cq.Vector(floor_x_max, -y_half, ride_h)
+        front_pos = cq.Vector(floor_x_max, +y_half, ride_h)
+        edges.append(cq.Edge.makeLine(front_neg, front_pos))
+    # Rear (diffuser kickline, or straight line at floor_x_min).
+    if diffuser_kickline is not None:
+        edges.append(diffuser_kickline)
+        rear_neg = _kickline_vertex(diffuser_kickline, -y_half)
+        rear_pos = _kickline_vertex(diffuser_kickline, +y_half)
+    else:
+        rear_neg = cq.Vector(floor_x_min, -y_half, ride_h)
+        rear_pos = cq.Vector(floor_x_min, +y_half, ride_h)
+        edges.append(cq.Edge.makeLine(rear_neg, rear_pos))
+    # Side edges.
+    edges.append(cq.Edge.makeLine(front_neg, rear_neg))   # -y side
+    edges.append(cq.Edge.makeLine(front_pos, rear_pos))   # +y side
+    wire = cq.Wire.assembleEdges(edges)
+    return cq.Face.makeFromWires(wire)
+
+
+def _sew_faces(faces):
+    """Sew faces into a single Shell. Falls back to Compound if sewing fails."""
+    from OCP.BRepBuilderAPI import BRepBuilderAPI_Sewing
+    sewing = BRepBuilderAPI_Sewing(0.1)  # 0.1 mm coincidence tolerance
+    for f in faces:
+        sewing.Add(f.wrapped)
+    sewing.Perform()
+    return cq.Shape.cast(sewing.SewedShape())
+
+
+def build_floor_multisection(spec: FloorSpec):
+    """Sewn Shell of (optional) splitter face + flat floor + (optional)
+    diffuser face. At least one of splitter_sections / diffuser_sections
+    must be set on ``spec`` (otherwise the caller would pick the legacy
+    builder)."""
+    ride_h = spec.ride_height_mm
+    y_half = spec.floor_width_mm / 2.0
+
+    faces = []
+    splitter_kickline = None
+    diffuser_kickline = None
+
+    if spec.splitter_sections is not None:
+        splitter_face, splitter_kickline, _ = _build_splitter_face(spec)
+        faces.append(splitter_face)
+
+    if spec.diffuser_sections is not None:
+        diffuser_face, diffuser_kickline, _ = _build_diffuser_face(spec)
+        faces.append(diffuser_face)
+
+    flat_face = _build_flat_floor_face(
+        splitter_kickline, diffuser_kickline,
+        spec.floor_x_max, spec.floor_x_min, y_half, ride_h)
+    faces.append(flat_face)
+
+    return _sew_faces(faces)
 
 
 def _build_below_cropper_multisection(spec: FloorSpec):
-    """Half-space below the multisection floor: extrude each face down 2000mm."""
+    """Half-space below the multisection floor: extrude each face down 2000mm
+    and fuse."""
     from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
     from OCP.gp import gp_Vec
 
-    compound = build_floor_multisection(spec)
+    shape = build_floor_multisection(spec)
     drop = gp_Vec(0.0, 0.0, -2000.0)
     solids = []
-    for f in compound.Faces():
+    for f in shape.Faces():
         prism = BRepPrimAPI_MakePrism(f.wrapped, drop).Shape()
         solids.append(cq.Shape.cast(prism))
     cropper = solids[0]

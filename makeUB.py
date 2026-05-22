@@ -113,7 +113,9 @@ spec = UnderbodySpec(
     # tangent handle is 35% of the straight-line distance between the
     # kick point and the rear endpoint. Typical values 0.2–0.5.
     #
-    # from paramub import DiffuserSection
+    # Outermost section's y_mm must match floor_width/2.
+    #
+    # from paramub import DiffuserSection, SplitterSection
     # diffuser_sections = [
     #     DiffuserSection(y_mm=0.0,   kick_x_mm=-1350.0,
     #                     rear_x_mm=-2150.0, rear_z_mm=200.0,
@@ -123,6 +125,16 @@ spec = UnderbodySpec(
     #                     rear_x_mm=-2150.0, rear_z_mm=300.0,
     #                     rear_angle_deg=12.0,
     #                     start_strength=0.21, end_strength=0.26),
+    # ],
+    # splitter_sections = [
+    #     SplitterSection(y_mm=0.0,   kick_x_mm=1450.0,
+    #                     front_x_mm=2200.0, front_z_mm=150.0,
+    #                     front_angle_deg=5.0,
+    #                     start_strength=0.30, end_strength=0.30),
+    #     SplitterSection(y_mm=900.0, kick_x_mm=1400.0,
+    #                     front_x_mm=2200.0, front_z_mm=180.0,
+    #                     front_angle_deg=8.0,
+    #                     start_strength=0.25, end_strength=0.25),
     # ],
 
     # ----- wheelhouses ------------------------------------------------

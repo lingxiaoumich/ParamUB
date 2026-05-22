@@ -23,6 +23,7 @@ import cadquery as cq
 from .floor_builder import (
     DiffuserSection,
     FloorSpec,
+    SplitterSection,
     build_below_cropper,
     build_floor,
 )
@@ -52,6 +53,11 @@ class UnderbodySpec:
                                   the legacy diffuser_angle_deg /
                                   diffuser_radius_mm are ignored and the
                                   diffuser is built as a Bezier loft.
+        splitter_sections:       optional list[SplitterSection] — front-of-
+                                  car analogue of diffuser_sections.
+                                  Splitter and diffuser are built as
+                                  independent lofts sewn to a flat-floor
+                                  face at their (extracted) kicklines.
         diffuser_start_x_mm:     None -> rear axle, else absolute X.
         diffuser_angle_deg:      ramp angle.
         diffuser_radius_mm:      tangent fillet between floor and ramp.
@@ -90,6 +96,7 @@ class UnderbodySpec:
     diffuser_angle_deg: float = 7.0
     diffuser_radius_mm: float = 500.0
     diffuser_sections: Optional[list[DiffuserSection]] = None
+    splitter_sections: Optional[list[SplitterSection]] = None
 
     # wheelhouses
     wheel_house_axial_clearance_mm: float = 30.0
@@ -247,6 +254,7 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
         diffuser_angle_deg=spec.diffuser_angle_deg,
         diffuser_radius_mm=spec.diffuser_radius_mm,
         diffuser_sections=spec.diffuser_sections,
+        splitter_sections=spec.splitter_sections,
     )
     floor = build_floor(floor_spec)
     below_cropper = build_below_cropper(floor_spec).val()

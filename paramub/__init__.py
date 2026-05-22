@@ -31,6 +31,7 @@ from .wheelhouse_builder import (
 from .floor_builder import (
     DiffuserSection,
     FloorSpec,
+    SplitterSection,
     build_floor,
     cubic_bezier_edge,
     cubic_bezier_from_tangents,
@@ -44,7 +45,7 @@ __all__ = [
     "WheelSpec", "assemble_wheel",
     "WheelhouseSpec", "build_wheelhouse_solid", "extract_wheelhouse_surfaces",
     "cubic_bezier_edge", "cubic_bezier_from_tangents",
-    "DiffuserSection", "FloorSpec", "build_floor",
+    "DiffuserSection", "SplitterSection", "FloorSpec", "build_floor",
     "UnderbodySpec", "build_underbody",
     "generate",
 ]
