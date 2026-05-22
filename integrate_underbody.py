@@ -290,7 +290,6 @@ def build_spec(hints: dict, diffuser_angle: float,
         track_rear_mm=hints["track_mm"],
         ride_height_mm=hints["ride_height_mm"],
         floor_width_mm=hints["floor_width_mm"],
-        floor_thickness_mm=0.0,    # CFD surface mode
         diffuser_angle_deg=diffuser_angle,
         diffuser_radius_mm=min(250.0, 0.4 * hints["rear_overhang_mm"]),
         wheel_house_axial_clearance_mm=20.0,

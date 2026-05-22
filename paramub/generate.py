@@ -46,10 +46,19 @@ OutputMode = Literal["stl", "all"]
 PACKAGE_DIR = Path(__file__).resolve().parent
 RENDER_SCRIPT = PACKAGE_DIR / "_render_views.py"
 
-# STL tessellation tolerance used by both linear deflection (mm) and
-# angular deflection (rad). 0.1 mm = ~400k faces on the default underbody,
-# good for CFD surface meshes.
+# STL tessellation tolerances.
+#   linear  (mm)   controls flat-surface chord error.
+#   angular (rad)  controls curved-surface chord step.
+#
+# Global default is 0.1 rad (≈5.7°) — matches legacy behavior and keeps
+# wheel/tire export fast (their many small curves dominate cost).
+#
+# The FLOOR per-part export uses a separate, finer angular tolerance
+# (DEFAULT_FLOOR_ANGULAR_TOLERANCE_RAD) so the multisection-diffuser
+# Bezier loft tessellates smoothly without paying the cost on the wheels.
 DEFAULT_STL_TOLERANCE_MM = 0.1
+DEFAULT_STL_ANGULAR_TOLERANCE_RAD = 0.1
+DEFAULT_FLOOR_ANGULAR_TOLERANCE_RAD = 0.02
 
 
 class _Tee(io.TextIOBase):
@@ -79,15 +88,35 @@ def _spec_to_dict(spec) -> dict:
     return spec
 
 
-def _export_stl(asy: cq.Assembly, stl_path: Path, tolerance: float) -> None:
+def _export_stl(asy: cq.Assembly, stl_path: Path, tolerance: float,
+                 angular_tolerance: float) -> None:
     compound = asy.toCompound()
     exporters.export(
         compound,
         str(stl_path),
         exporters.ExportTypes.STL,
         tolerance=tolerance,
-        angularTolerance=tolerance,
+        angularTolerance=angular_tolerance,
     )
+
+
+def _premesh_body(asy: cq.Assembly, linear_tol: float,
+                  body_angular_tol: float) -> None:
+    """Pre-mesh the 'body' child at a finer angular tolerance.
+
+    BRepMesh refuses to refine an existing mesh when a coarser tolerance is
+    later requested, so the merged STL exporter (run at the global, coarser
+    angular tolerance) would otherwise lock in a coarse mesh for the body
+    too. Running the fine mesh first locks the finer one in before that
+    happens; the coarse export sees an already-meshed body and only meshes
+    the wheels.
+    """
+    from OCP.BRepMesh import BRepMesh_IncrementalMesh
+    for child in asy.children:
+        if child.name == "body":
+            BRepMesh_IncrementalMesh(
+                child.obj.wrapped, linear_tol, False,
+                body_angular_tol, True)
 
 
 def _export_step_assembly(asy: cq.Assembly, step_path: Path) -> None:
@@ -139,7 +168,6 @@ def _meta_lines(spec: UnderbodySpec, layout: dict, stl_path: Path) -> list[str]:
         f"{spec.rear_overhang_mm}",
         f"  overall length (mm) = {layout['overall_length_mm']:.0f}",
         f"  floor_width_mm      = {spec.floor_width_mm}",
-        f"  floor_thickness_mm  = {spec.floor_thickness_mm}",
         f"  ride_height_mm      = {spec.ride_height_mm}",
         f"  floor_angle_deg     = {spec.floor_angle_deg}",
         f"  diffuser_start_x_mm = {layout['diff_start_x']:.0f}",
@@ -209,8 +237,14 @@ _PART_BASENAME = {
 
 
 def _export_parts_stl(asy: cq.Assembly, output_dir: Path,
-                       tolerance: float) -> dict[str, str]:
-    """Write one STL per named child of ``asy`` with fixed UPPERCASE names."""
+                       tolerance: float, angular_tolerance: float,
+                       floor_angular_tolerance: float) -> dict[str, str]:
+    """Write one STL per named child of ``asy`` with fixed UPPERCASE names.
+
+    The FLOOR (body) part uses ``floor_angular_tolerance`` so the
+    multisection-diffuser Bezier loft tessellates finely; all other
+    parts (wheels) use the global ``angular_tolerance``.
+    """
     written: dict[str, str] = {}
     for child in asy.children:
         base = _PART_BASENAME.get(child.name)
@@ -221,12 +255,14 @@ def _export_parts_stl(asy: cq.Assembly, output_dir: Path,
         sub = cq.Assembly()
         sub.add(child.obj, name=child.name)
         out_path = output_dir / f"{base}.STL"
+        part_ang = (floor_angular_tolerance if child.name == "body"
+                    else angular_tolerance)
         exporters.export(
             sub.toCompound(),
             str(out_path),
             exporters.ExportTypes.STL,
             tolerance=tolerance,
-            angularTolerance=tolerance,
+            angularTolerance=part_ang,
         )
         size_mb = out_path.stat().st_size / (1024 * 1024)
         print(f"  part   : {out_path.name}  ({size_mb:.1f} MB)")
@@ -261,6 +297,9 @@ def generate(
     output_parts: bool = False,
     export_step: bool = False,
     stl_tolerance_mm: float = DEFAULT_STL_TOLERANCE_MM,
+    stl_angular_tolerance_rad: float = DEFAULT_STL_ANGULAR_TOLERANCE_RAD,
+    floor_angular_tolerance_rad: float = DEFAULT_FLOOR_ANGULAR_TOLERANCE_RAD,
+    half_only: bool = False,
 ) -> dict:
     """Build the underbody and write outputs.
 
@@ -284,7 +323,19 @@ def generate(
         tessellation; preserves named subparts). When combined with
         ``output_parts=True``, also writes per-part ``*.STEP`` files.
     stl_tolerance_mm:
-        Linear + angular tolerance passed to the STL exporter.
+        Linear chord tolerance (mm) for the STL exporter — controls flat
+        surface accuracy.
+    stl_angular_tolerance_rad:
+        Angular chord tolerance (rad) applied to the merged STL and to
+        per-part wheel STLs. Coarser = faster + smaller files.
+    floor_angular_tolerance_rad:
+        Angular chord tolerance (rad) applied to the FLOOR per-part STL
+        only. Finer than ``stl_angular_tolerance_rad`` so the
+        multisection-diffuser Bezier loft tessellates smoothly without
+        making the wheel parts pay the cost.
+    half_only:
+        If True, build and export only the left (y<0) half of the car —
+        2 wheels + half floor + half-arch geometry, sliced at y=0.
 
     Returns a record dict with paths + status.
     """
@@ -310,10 +361,15 @@ def generate(
     if output_mode == "stl":
         # Direct path; no log capture, no renderer.
         t0 = time.time()
-        asy, layout = build_underbody(spec)
-        _export_stl(asy, stl_path, stl_tolerance_mm)
+        asy, layout = build_underbody(spec, half_only=half_only)
+        _premesh_body(asy, stl_tolerance_mm, floor_angular_tolerance_rad)
+        _export_stl(asy, stl_path, stl_tolerance_mm,
+                    stl_angular_tolerance_rad)
         if output_parts:
-            record["parts"] = _export_parts_stl(asy, output_dir, stl_tolerance_mm)
+            record["parts"] = _export_parts_stl(
+                asy, output_dir, stl_tolerance_mm,
+                stl_angular_tolerance_rad,
+                floor_angular_tolerance_rad)
         if export_step:
             _export_step_assembly(asy, step_path)
             print(f"  step   : {step_path.name}  "
@@ -351,19 +407,24 @@ def generate(
                 print(f"params dumped -> {json_path.name}")
 
                 t_build0 = time.time()
-                asy, layout = build_underbody(spec)
+                asy, layout = build_underbody(spec, half_only=half_only)
                 t_build = time.time() - t_build0
                 print(f"build  : {t_build:.1f}s")
 
                 t_export0 = time.time()
-                _export_stl(asy, stl_path, stl_tolerance_mm)
+                _premesh_body(asy, stl_tolerance_mm,
+                              floor_angular_tolerance_rad)
+                _export_stl(asy, stl_path, stl_tolerance_mm,
+                            stl_angular_tolerance_rad)
                 t_export = time.time() - t_export0
                 size_mb = stl_path.stat().st_size / (1024 * 1024)
                 print(f"export : {t_export:.1f}s  ->  {stl_path.name}  ({size_mb:.1f} MB)")
 
                 if output_parts:
                     record["parts"] = _export_parts_stl(
-                        asy, output_dir, stl_tolerance_mm)
+                        asy, output_dir, stl_tolerance_mm,
+                        stl_angular_tolerance_rad,
+                        floor_angular_tolerance_rad)
 
                 if export_step:
                     t_step0 = time.time()

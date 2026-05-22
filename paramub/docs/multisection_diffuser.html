@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Multisection Bezier Diffuser</title>
+<link rel="stylesheet" href="_style.css">
+<style>
+  /* Diagram-local tweaks: keep labels readable on SVG */
+  .diagram svg { width: 100%; height: auto; display: block; }
+  .diagram { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px;
+             background: white; }
+  .diagram .legend { display: flex; flex-wrap: wrap; gap: 16px;
+                     margin-top: 10px; font-size: 13px; color: #374151; }
+  .diagram .legend .sw { display: inline-block; width: 22px; height: 4px;
+                         vertical-align: middle; margin-right: 6px; }
+  .pt-label { font: 600 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+              fill: #111827; }
+  .param-label { font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+                 fill: #1f4ed8; }
+  .axis-label { font: 11px ui-sans-serif, system-ui; fill: #6b7280; }
+  .grid { stroke: #f3f4f6; stroke-width: 1; }
+  .ground { stroke: #9ca3af; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .floor  { stroke: #6b7280; stroke-width: 2.5; }
+  .handle { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .bezier { stroke: #dc2626; stroke-width: 3; fill: none; }
+  .point  { stroke: #111827; stroke-width: 1.5; fill: white; }
+  .point.end { fill: #111827; }
+  .leader { stroke: #1f4ed8; stroke-width: 1; }
+  .annot-x { stroke: #047857; stroke-width: 1.5; }
+  .annot-z { stroke: #b45309; stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Floor &amp; Diffuser — Multisection</div>
+  <h1>Multisection Bezier Diffuser</h1>
+  <p class="subtitle">
+    Drop-in replacement for the legacy <code>angle + radius</code> diffuser.
+    Each cross-section is a cubic Bezier in the XZ plane, lofted across
+    Y for a smooth laterally-varying diffuser. The implementation is
+    layered on two reusable primitives so the Bezier construction can be
+    used standalone.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#layers">Three-layer API</a></li>
+    <li><a href="#construction">How one section is constructed</a></li>
+    <li><a href="#params">Parameter reference</a></li>
+    <li><a href="#cookbook">Shape cookbook</a></li>
+    <li><a href="#sections">Combining multiple sections</a></li>
+    <li><a href="#usage">Usage</a></li>
+  </ul>
+</nav>
+
+<h2 id="overview">Overview</h2>
+<p>
+  Set <code>FloorSpec.diffuser_sections</code> (or
+  <code>UnderbodySpec.diffuser_sections</code>) to a list of
+  <code>DiffuserSection</code> instances. Each section defines the
+  diffuser's profile in the XZ plane at one Y position. The builder
+  auto-mirrors sections at <code>y_mm &gt; 0</code> across Y=0 and lofts
+  through all sections to produce a single continuous floor+diffuser
+  surface. When set, the legacy
+  <code>diffuser_angle_deg</code> / <code>diffuser_radius_mm</code> are
+  ignored.
+</p>
+<div class="callout info">
+  <strong>Tangency.</strong> Every Bezier starts with its first handle
+  pointing horizontally along −X (toward the rear), so the curve is
+  automatically tangent to the flat floor at the kickline. You don't
+  tune anything for this — it's a structural property of the
+  construction.
+</div>
+
+<h2 id="layers">Three-layer API</h2>
+<p>
+  The Bezier construction lives in three layers, each one building on
+  the previous. You can call any layer directly.
+</p>
+<table>
+  <thead>
+    <tr><th>Layer</th><th>Function / class</th><th>Inputs</th><th>Use when…</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td><code>cubic_bezier_edge(p0, p1, p2, p3)</code></td>
+      <td>Four <code>cq.Vector</code> control points.</td>
+      <td>You already have the four control points and just need a
+          <code>cq.Edge</code>.</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td><code>cubic_bezier_from_tangents(p0, p3, t0, t3, s0, s3)</code></td>
+      <td>Two endpoints, two outgoing tangent direction vectors
+          (3D — need not be unit length), two relative strengths.</td>
+      <td>You want to specify the curve by its endpoints + tangent
+          directions and tune the handle strength as a fraction of the
+          chord length <code>|P3 − P0|</code>. Direction-of-travel
+          convention: both <code>t0</code> and <code>t3</code> point
+          along curve travel (outgoing at the start, outgoing at the
+          end).</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td><code>DiffuserSection</code></td>
+      <td>Y, kick X, rear X &amp; Z, rear angle, two strengths.</td>
+      <td>You want the underbody diffuser case where P0 is on the flat
+          floor and the start tangent is along the X axis. The
+          <code>DiffuserSection</code> dataclass encodes these
+          constraints and delegates to Layer 2.</td>
+    </tr>
+  </tbody>
+</table>
+<pre>from paramub import cubic_bezier_edge, cubic_bezier_from_tangents
+import cadquery as cq
+
+# Layer 1 — explicit 4-point Bezier (general purpose):
+edge = cubic_bezier_edge(
+    cq.Vector(0, 0, 0),
+    cq.Vector(100, 0, 0),
+    cq.Vector(150, 0, 80),
+    cq.Vector(200, 0, 100),
+)
+
+# Layer 2 — endpoints + tangent directions + relative strengths:
+edge = cubic_bezier_from_tangents(
+    p0 = cq.Vector(0, 0, 0),
+    p3 = cq.Vector(200, 0, 100),
+    t0 = cq.Vector(1, 0, 0),         # leaves P0 along +X
+    t3 = cq.Vector(0, 0, 1),         # arrives at P3 going +Z
+    start_strength = 0.4,            # |P0-P1| = 0.4 * |P3-P0|
+    end_strength   = 0.4,            # |P3-P2| = 0.4 * |P3-P0|
+)
+</pre>
+<div class="callout">
+  <strong>Why relative strengths?</strong> Normalising by the chord
+  <code>|P3 − P0|</code> makes shapes scale consistently — doubling the
+  curve span keeps the same visual character. The same numeric strength
+  value gives the same "roundness" whether the chord is 50 mm or
+  500 mm.
+</div>
+
+<h2 id="construction">How one section is constructed</h2>
+<p>
+  A cubic Bezier has four control points: <code>P0</code>, <code>P1</code>,
+  <code>P2</code>, <code>P3</code>. <code>P0</code> and <code>P3</code>
+  are the endpoints (on the kickline and on the rear edge); <code>P1</code>
+  and <code>P2</code> are tangent handles that shape the curve in between.
+  You don't set the control points directly — you set seven parameters
+  that build them. The diagram below shows one section at
+  <code>y_mm = 0</code> with the parameter→geometry mapping called out
+  in blue.
+</p>
+
+<div class="figure">
+  <div class="diagram">
+    <svg viewBox="0 0 1000 540" xmlns="http://www.w3.org/2000/svg"
+         role="img" aria-label="Diagram of a single DiffuserSection in the XZ plane">
+
+      <!-- ---- grid + axes ---- -->
+      <g class="grid">
+        <line x1="60" y1="100" x2="940" y2="100"/>
+        <line x1="60" y1="180" x2="940" y2="180"/>
+        <line x1="60" y1="260" x2="940" y2="260"/>
+        <line x1="60" y1="340" x2="940" y2="340"/>
+        <line x1="60" y1="420" x2="940" y2="420"/>
+      </g>
+      <!-- ground (z=0) -->
+      <line class="ground" x1="60" y1="460" x2="940" y2="460"/>
+      <text class="axis-label" x="78" y="475">ground (z = 0)</text>
+
+      <!-- Z axis arrow -->
+      <line x1="60" y1="490" x2="60" y2="40" stroke="#374151" stroke-width="1"/>
+      <polygon points="60,30 56,42 64,42" fill="#374151"/>
+      <text class="axis-label" x="20" y="42" transform="rotate(-90 28,46)">+Z (up)</text>
+
+      <!-- X axis arrow (note: car +X points forward = toward right in this view, but rear of car is at large -X = left side) -->
+      <line x1="40" y1="490" x2="960" y2="490" stroke="#374151" stroke-width="1"/>
+      <polygon points="970,490 958,486 958,494" fill="#374151"/>
+      <text class="axis-label" x="920" y="505">+X (forward of car)</text>
+
+      <!-- ---- flat floor segment (z = ride_h = 100) ---- -->
+      <!-- Floor from P0 (kick) extending forward (+X) to x_max (right edge) -->
+      <line class="floor" x1="770.77" y1="360" x2="940" y2="360"/>
+      <text class="axis-label" x="850" y="350" text-anchor="middle">flat floor at z = ride_h</text>
+
+      <!-- vertical reference at kick_x -->
+      <line x1="770.77" y1="360" x2="770.77" y2="460" class="annot-z"
+            stroke-dasharray="3 3"/>
+      <text class="param-label" x="780" y="445">kick_x_mm</text>
+      <text class="axis-label" x="780" y="430">(P0.x)</text>
+
+      <!-- vertical reference at rear_x -->
+      <line x1="229.23" y1="180" x2="229.23" y2="460" class="annot-z"
+            stroke-dasharray="3 3"/>
+      <text class="param-label" x="138" y="445">rear_x_mm</text>
+      <text class="axis-label" x="138" y="430">(P3.x)</text>
+
+      <!-- horizontal reference for rear_z height -->
+      <line x1="60" y1="180" x2="229.23" y2="180" class="annot-x"
+            stroke-dasharray="3 3"/>
+      <text class="param-label" x="65" y="172">rear_z_mm</text>
+      <text class="axis-label" x="65" y="160">(P3.z absolute)</text>
+
+      <!-- horizontal reference for ride_h -->
+      <line x1="60" y1="360" x2="770.77" y2="360" class="annot-x"
+            stroke-dasharray="3 3" opacity="0.45"/>
+      <text class="axis-label" x="65" y="354" opacity="0.7">ride_h = 100</text>
+
+      <!-- ---- Bezier curve ---- -->
+      <path class="bezier"
+            d="M 770.77 360 C 601.54 360, 427.55 242, 229.23 180"/>
+
+      <!-- ---- handles (dashed) ---- -->
+      <line class="handle" x1="770.77" y1="360" x2="601.54" y2="360"/>
+      <line class="handle" x1="229.23" y1="180" x2="427.55" y2="242"/>
+
+      <!-- ---- control points ---- -->
+      <!-- P0 -->
+      <circle class="point end" cx="770.77" cy="360" r="6"/>
+      <text class="pt-label" x="780" y="378">P0  (kick_x_mm, ride_h)</text>
+
+      <!-- P1 -->
+      <circle class="point" cx="601.54" cy="360" r="5"/>
+      <text class="pt-label" x="610" y="378">P1</text>
+
+      <!-- P2 -->
+      <circle class="point" cx="427.55" cy="242" r="5"/>
+      <text class="pt-label" x="440" y="237">P2</text>
+
+      <!-- P3 -->
+      <circle class="point end" cx="229.23" cy="180" r="6"/>
+      <text class="pt-label" x="160" y="200">P3  (rear_x_mm, rear_z_mm)</text>
+
+      <!-- ---- start_strength annotation ---- -->
+      <!-- bracket below P0->P1 -->
+      <line x1="770.77" y1="395" x2="601.54" y2="395" class="leader"/>
+      <line x1="770.77" y1="390" x2="770.77" y2="400" class="leader"/>
+      <line x1="601.54" y1="390" x2="601.54" y2="400" class="leader"/>
+      <text class="param-label" x="686" y="412" text-anchor="middle">start_strength × |P0−P3|</text>
+
+      <!-- ---- end_strength annotation ---- -->
+      <!-- offset line parallel to P3->P2 -->
+      <line x1="245" y1="206" x2="443" y2="268" class="leader"/>
+      <line x1="229.23" y1="180" x2="245" y2="206" class="leader" opacity="0.5"/>
+      <line x1="427.55" y1="242" x2="443" y2="268" class="leader" opacity="0.5"/>
+      <text class="param-label" x="335" y="270"
+            transform="rotate(17 335,270)">end_strength × |P0−P3|</text>
+
+      <!-- ---- rear_angle_deg annotation ---- -->
+      <!-- small arc at P3 showing angle between P3->P2 tangent and horizontal -->
+      <path d="M 290 180 A 60 60 0 0 0 277 192" fill="none"
+            class="leader"/>
+      <text class="param-label" x="298" y="195">rear_angle_deg</text>
+      <!-- horizontal reference dash off P3 -->
+      <line x1="229.23" y1="180" x2="320" y2="180" stroke="#1f4ed8"
+            stroke-width="1" stroke-dasharray="2 3"/>
+
+      <!-- title / caption text -->
+      <text x="500" y="60" text-anchor="middle"
+            font-size="14" font-weight="600" fill="#111827">
+        One DiffuserSection — XZ plane at this section's y_mm
+      </text>
+      <text x="500" y="78" text-anchor="middle" font-size="12"
+            fill="#6b7280">
+        flow direction: +X is forward. Diffuser runs rearward (toward −X) and upward (+Z).
+      </text>
+    </svg>
+  </div>
+  <span class="caption">
+    Red: the cubic Bezier curve from <code>P0</code> (kickline) to
+    <code>P3</code> (rear endpoint). Dashed gray: tangent handles
+    <code>P0→P1</code> and <code>P3→P2</code> — the curve "leaves"
+    <code>P0</code> in the direction of <code>P1</code> and "arrives"
+    at <code>P3</code> from the direction of <code>P2</code>. Blue labels
+    show the seven user-set parameters that build the four control points.
+  </span>
+</div>
+
+<h3>Why the curve is automatically tangent to the floor</h3>
+<p>
+  Look at the line <code>P0→P1</code>: it lies on the flat floor (same Z
+  as the floor, just stepping backward in X by
+  <code>start_strength × |P0−P3|</code>).
+  Because a Bezier's start tangent direction equals
+  <code>(P1 − P0)</code>, the curve <strong>must</strong> leave
+  <code>P0</code> flat. That's why the diffuser meets the floor with no
+  visible crease at the kickline. You don't have to opt in — it falls
+  out of the parameterisation.
+</p>
+<p>
+  Same idea at the rear: <code>P3→P2</code> defines the exit tangent
+  direction. <code>rear_angle_deg</code> rotates that handle relative
+  to horizontal; <code>end_strength</code> controls how far along that
+  direction <code>P2</code> sits — bigger strength = the curve commits
+  to the rear-angle direction sooner.
+</p>
+
+<h2 id="params">Parameter reference</h2>
+<p>
+  Each <code>DiffuserSection</code> takes seven arguments. They are
+  all in millimetres / degrees and have no defaults — you must set them
+  explicitly.
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>Parameter</th>
+      <th>Builds</th>
+      <th>Geometric meaning</th>
+      <th>Direction of effect</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>y_mm</code></td>
+      <td>Section's Y</td>
+      <td>Y-position of this cross-section. Must be ≥ 0; auto-mirrored
+          to <code>−y_mm</code>.</td>
+      <td>Lateral placement of the profile across the floor width.</td>
+    </tr>
+    <tr>
+      <td><code>kick_x_mm</code></td>
+      <td><code>P0.x</code></td>
+      <td>X where the diffuser starts curving up.</td>
+      <td>Increase (less negative) → diffuser starts earlier (longer kick).
+          Decrease → flat floor extends further before the kick.</td>
+    </tr>
+    <tr>
+      <td><code>rear_x_mm</code></td>
+      <td><code>P3.x</code></td>
+      <td>X where the diffuser ends.</td>
+      <td>Decrease (more negative) → longer diffuser ramp.</td>
+    </tr>
+    <tr>
+      <td><code>rear_z_mm</code></td>
+      <td><code>P3.z</code></td>
+      <td>Absolute Z height of the diffuser exit (must be ≥ ride_h).</td>
+      <td>Higher value → more aggressive total kick rise.</td>
+    </tr>
+    <tr>
+      <td><code>rear_angle_deg</code></td>
+      <td>Direction of <code>P3→P2</code></td>
+      <td>Tangent angle at the rear exit, measured up from −X
+          (the rearward flow direction).</td>
+      <td>Larger → steeper, more vertical exit. Smaller → curve nearly
+          flat at exit.</td>
+    </tr>
+    <tr>
+      <td><code>start_strength</code></td>
+      <td>Length of <code>P0→P1</code> divided by chord <code>|P0−P3|</code></td>
+      <td>How long the curve stays horizontal-tangent before bending.
+          Dimensionless; typical values 0.2–0.5.</td>
+      <td>Larger → flat dwell past kick line, curve bends late.
+          Smaller → curve starts bending immediately at the kick.</td>
+    </tr>
+    <tr>
+      <td><code>end_strength</code></td>
+      <td>Length of <code>P3→P2</code> divided by chord <code>|P0−P3|</code></td>
+      <td>How strongly the curve commits to the rear-exit direction.
+          Dimensionless; typical values 0.2–0.5.</td>
+      <td>Larger → curve points at the rear angle earlier in its travel.
+          Smaller → exit angle barely realised; ramp looks shallower.</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout">
+  <strong>Validation.</strong> The constructor rejects
+  <code>rear_x_mm ≥ kick_x_mm</code> (the curve must move rearward),
+  negative <code>rear_z_mm</code>, and negative strengths. The middle
+  control points <code>P1</code> and <code>P2</code> may overlap each
+  other in X — that's allowed, and useful for tight S-curves.
+</div>
+
+<h2 id="cookbook">Shape cookbook</h2>
+<table>
+  <thead><tr><th>You want…</th><th>Adjust</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Diffuser to start farther back (later kick)</td>
+      <td>Make <code>kick_x_mm</code> more negative.</td>
+    </tr>
+    <tr>
+      <td>Longer / shorter diffuser ramp</td>
+      <td>Make <code>rear_x_mm</code> more / less negative.</td>
+    </tr>
+    <tr>
+      <td>Steeper exit (more aggressive kick)</td>
+      <td>Increase <code>rear_angle_deg</code> and/or <code>rear_z_mm</code>.</td>
+    </tr>
+    <tr>
+      <td>Gentle, gradual curve</td>
+      <td>Increase both strengths (<code>start_strength</code>,
+          <code>end_strength</code>) so the curve eases through the kick.</td>
+    </tr>
+    <tr>
+      <td>Sharp "elbow" — long flat, then quick kick</td>
+      <td>Large <code>start_strength</code>, small
+          <code>end_strength</code>, large <code>rear_angle_deg</code>.</td>
+    </tr>
+    <tr>
+      <td>Traditional shallow ramp diffuser</td>
+      <td>Small strengths, small <code>rear_angle_deg</code>, modest
+          <code>rear_z_mm</code>.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="sections">Combining multiple sections</h2>
+<p>
+  You can specify any number of sections at <code>y_mm ≥ 0</code>. The
+  builder mirrors them to <code>y_mm &lt; 0</code> automatically, sorts
+  by Y, and lofts through all of them:
+</p>
+<ul>
+  <li><strong>N = 2 sections</strong> (after mirror): ruled (straight)
+      loft between the two profiles. Each Y between them is a linear
+      interpolation of the two Bezier shapes.</li>
+  <li><strong>N ≥ 3 sections</strong>: smooth spline loft through all
+      profiles. Curvature in Y is gentle and continuous.</li>
+</ul>
+<p>
+  Each section is independent — you can vary <em>any</em> of the seven
+  parameters between sections. Common patterns:
+</p>
+<table>
+  <thead>
+    <tr><th>Effect</th><th>What varies across sections</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>V-shaped kickline in plan</td>
+      <td>Only <code>kick_x_mm</code> changes; all other shape
+          parameters identical → diffuser flares earlier outboard.</td>
+    </tr>
+    <tr>
+      <td>Centre tunnel (mild centre, aggressive outboard)</td>
+      <td>Lower <code>rear_z_mm</code> / <code>rear_angle_deg</code>
+          at <code>y_mm = 0</code>; higher at outboard sections.</td>
+    </tr>
+    <tr>
+      <td>Inverse centre tunnel</td>
+      <td>Opposite — aggressive at centre, mild outboard.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="usage">Usage</h2>
+<p>
+  In <code>makeUB.py</code>, set <code>diffuser_sections</code> on the
+  <code>UnderbodySpec</code>. When set, it overrides the legacy
+  <code>diffuser_angle_deg</code> / <code>diffuser_radius_mm</code>.
+</p>
+<pre>from paramub import (
+    DiffuserSection, UnderbodySpec, generate,
+    WheelSpec, TireSpec, SpokeSpec,
+)
+
+diffuser_sections = [
+    DiffuserSection(
+        y_mm           = 0.0,         # centreline
+        kick_x_mm      = -1350.0,     # diffuser starts at rear axle
+        rear_x_mm      = -2150.0,     # ends at rear of underbody
+        rear_z_mm      = 200.0,       # exits 100 mm above ride height
+        rear_angle_deg = 8.0,         # gentle exit angle
+        start_strength = 0.37,        # ~300 mm flat dwell past kick
+        end_strength   = 0.37,
+    ),
+    DiffuserSection(
+        y_mm           = 900.0,       # outboard (at the floor edge)
+        kick_x_mm      = -1200.0,     # kicks 150 mm earlier than centre
+        rear_x_mm      = -2150.0,
+        rear_z_mm      = 300.0,       # higher exit than centre
+        rear_angle_deg = 12.0,        # steeper exit
+        start_strength = 0.21,
+        end_strength   = 0.26,
+    ),
+]
+
+spec = UnderbodySpec(
+    # ... (plan, ride, wheels, etc.)
+    diffuser_sections = diffuser_sections,
+)
+
+generate(spec, output_dir="outputs/UB1", stem="ub",
+         output_mode="all", output_parts=True, export_step=True,
+         half_only=True)   # left-half (y &lt; 0) only
+</pre>
+
+<p>
+  See also: <a href="floor_builder.html">Floor &amp; Diffuser Builder</a>
+  for the legacy <code>angle + radius</code> form and surface/cropper
+  internals.
+</p>
+
+<footer>
+  ParamUB — parametric underbody generator.
+</footer>
+</main>
+</body>
+</html>

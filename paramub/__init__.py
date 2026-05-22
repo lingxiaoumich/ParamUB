@@ -28,7 +28,13 @@ from .wheelhouse_builder import (
     build_wheelhouse_solid,
     extract_wheelhouse_surfaces,
 )
-from .floor_builder import FloorSpec, build_floor
+from .floor_builder import (
+    DiffuserSection,
+    FloorSpec,
+    build_floor,
+    cubic_bezier_edge,
+    cubic_bezier_from_tangents,
+)
 from .ub_assem import UnderbodySpec, build_underbody
 from .generate import generate
 
@@ -37,7 +43,8 @@ __all__ = [
     "SpokeSpec", "build_spoke_disc", "cut_spoke_windows", "build_rim_barrel",
     "WheelSpec", "assemble_wheel",
     "WheelhouseSpec", "build_wheelhouse_solid", "extract_wheelhouse_surfaces",
-    "FloorSpec", "build_floor",
+    "cubic_bezier_edge", "cubic_bezier_from_tangents",
+    "DiffuserSection", "FloorSpec", "build_floor",
     "UnderbodySpec", "build_underbody",
     "generate",
 ]

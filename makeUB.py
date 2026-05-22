@@ -95,13 +95,35 @@ spec = UnderbodySpec(
     # ----- ride / floor / diffuser ------------------------------------
     ride_height_mm     = 100.0,     # ground -> floor underside
     floor_width_mm     = 1800.0,    # plan width of the rectangular floor
-    floor_thickness_mm = 0.0,       # 0 -> zero-thickness surface (CFD)
-                                    # >0 -> solid slab of that thickness
     floor_angle_deg    = 0.0,       # rake about the front edge
 
     diffuser_start_x_mm = None,     # None -> rear axle
     diffuser_angle_deg  = 7.0,
     diffuser_radius_mm  = 500.0,    # tangent fillet between floor + ramp
+
+    # ----- multisection diffuser (overrides angle/radius when set) ----
+    # Cubic-Bezier cross-sections at y_mm >= 0, auto-mirrored across y=0,
+    # lofted smooth for N>=3 / ruled for N==2. Each section's profile
+    # spans floor_x_max -> kick (flat) -> Bezier -> rear endpoint, so the
+    # flat floor and the diffuser are one continuous lofted surface and
+    # the curve is tangent to the floor at its kickline by construction.
+    #
+    # start_strength and end_strength are dimensionless handle lengths
+    # normalised to the chord |P0-P3|: a strength of 0.35 means the
+    # tangent handle is 35% of the straight-line distance between the
+    # kick point and the rear endpoint. Typical values 0.2–0.5.
+    #
+    # from paramub import DiffuserSection
+    # diffuser_sections = [
+    #     DiffuserSection(y_mm=0.0,   kick_x_mm=-1350.0,
+    #                     rear_x_mm=-2150.0, rear_z_mm=200.0,
+    #                     rear_angle_deg=8.0,
+    #                     start_strength=0.37, end_strength=0.37),
+    #     DiffuserSection(y_mm=900.0, kick_x_mm=-1200.0,
+    #                     rear_x_mm=-2150.0, rear_z_mm=300.0,
+    #                     rear_angle_deg=12.0,
+    #                     start_strength=0.21, end_strength=0.26),
+    # ],
 
     # ----- wheelhouses ------------------------------------------------
     wheel_house_axial_clearance_mm   = 30.0,    # tire OD -> arch ID
@@ -138,4 +160,6 @@ if __name__ == "__main__":
                                            # (+ FLOOR.STEP, WHEEL_*.STEP when
                                            #  combined with output_parts=True)
         stl_tolerance_mm = 0.1,            # smaller = finer mesh, larger STL
+        half_only        = True,           # left (y<0) half only; flip to
+                                           # False to build the full car
     )

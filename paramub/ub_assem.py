@@ -21,6 +21,7 @@ from typing import Optional
 import cadquery as cq
 
 from .floor_builder import (
+    DiffuserSection,
     FloorSpec,
     build_below_cropper,
     build_floor,
@@ -46,8 +47,11 @@ class UnderbodySpec:
     Ride / floor / diffuser
         ride_height_mm:          ground -> floor underside.
         floor_width_mm:          plan width of the rectangular floor.
-        floor_thickness_mm:      0 -> surface (Face), >0 -> slab solid.
         floor_angle_deg:         rake about the front edge.
+        diffuser_sections:       optional list[DiffuserSection]. When set,
+                                  the legacy diffuser_angle_deg /
+                                  diffuser_radius_mm are ignored and the
+                                  diffuser is built as a Bezier loft.
         diffuser_start_x_mm:     None -> rear axle, else absolute X.
         diffuser_angle_deg:      ramp angle.
         diffuser_radius_mm:      tangent fillet between floor and ramp.
@@ -81,11 +85,11 @@ class UnderbodySpec:
     # ride / floor / diffuser
     ride_height_mm: float = 100.0
     floor_width_mm: float = 1800.0
-    floor_thickness_mm: float = 0.0
     floor_angle_deg: float = 0.0
     diffuser_start_x_mm: Optional[float] = None
     diffuser_angle_deg: float = 7.0
     diffuser_radius_mm: float = 500.0
+    diffuser_sections: Optional[list[DiffuserSection]] = None
 
     # wheelhouses
     wheel_house_axial_clearance_mm: float = 30.0
@@ -207,12 +211,9 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
                      half_only: bool = False):
     """Top-level: build floor + wheelhouses + place wheels.
 
-    half_only=True: skip the right-side wheels/wheelhouses entirely. The
-    floor still spans the full width (the floor builder doesn't have a
-    half-mode), but the right-side wheelhouse cuts are skipped, so a
-    downstream y=0 slice produces the same result as the left half of a
-    full build (minus the right-wheelhouse-cut artefacts that don't
-    matter on the left side).
+    half_only=True: produce only the left (y<0) half of the car. Skips
+    the right-side wheels/wheelhouses entirely and slices the body at
+    y=0 so the floor and arches are cleanly cut at the centerline.
 
     Returns (Assembly, layout dict).
     """
@@ -242,10 +243,10 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
         floor_x_max=layout["floor_x_max"],
         floor_width_mm=spec.floor_width_mm,
         ride_height_mm=spec.ride_height_mm,
-        floor_thickness_mm=spec.floor_thickness_mm,
         diffuser_start_x_mm=layout["diff_start_x"],
         diffuser_angle_deg=spec.diffuser_angle_deg,
         diffuser_radius_mm=spec.diffuser_radius_mm,
+        diffuser_sections=spec.diffuser_sections,
     )
     floor = build_floor(floor_spec)
     below_cropper = build_below_cropper(floor_spec).val()
@@ -258,25 +259,14 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
     )
     wh_solids = [(s, build_wheelhouse_solid(s)) for s in wh_specs]
 
-    if spec.floor_thickness_mm <= 0:
-        # Surface mode: cut the floor Face with each wheelhouse solid so the
-        # floor's edge picks up the fillet; extract outer wheelhouse faces.
-        for _s, solid in wh_solids:
-            floor = _cut_face_with_solid(floor, solid.val())
-        wh_faces = []
-        for s, solid in wh_solids:
-            wh_faces.extend(extract_wheelhouse_surfaces(solid, s, below_cropper))
-        body = cq.Compound.makeCompound([floor, *wh_faces])
-    else:
-        # Slab mode: floor slab + closed half-cylinder wheelhouse solids
-        # unioned in. (The thin-shell variant from the prototype lives in
-        # paramub/debug/underbody_files/build.py if you need it.)
-        body = floor
-        for _s, solid in wh_solids:
-            try:
-                body = body.union(solid)
-            except Exception as exc:
-                print(f"[warn] wheelhouse union failed: {exc}")
+    # Cut the floor Face with each wheelhouse solid so the floor's edge
+    # picks up the fillet; extract outer wheelhouse faces.
+    for _s, solid in wh_solids:
+        floor = _cut_face_with_solid(floor, solid.val())
+    wh_faces = []
+    for s, solid in wh_solids:
+        wh_faces.extend(extract_wheelhouse_surfaces(solid, s, below_cropper))
+    body = cq.Compound.makeCompound([floor, *wh_faces])
 
     if abs(spec.floor_angle_deg) > 1e-6:
         pivot_x = layout["floor_x_max"]
@@ -285,6 +275,17 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
             (pivot_x, 1, spec.ride_height_mm),
             -spec.floor_angle_deg,
         )
+
+    if half_only:
+        # Slice body at y=0: cut away everything with y > 0 so the result
+        # is a true left-half model (the floor builder always produces a
+        # full-width surface, and the wheelhouse cuts skipped above were
+        # only on the right side, so without this slice the body still
+        # spans both sides minus right-arch trim).
+        huge = 10000.0
+        y_pos_halfspace = (cq.Workplane("XY").box(huge, huge, huge)
+                           .translate((0, huge / 2.0, 0)).val())
+        body = _cut_face_with_solid(body, y_pos_halfspace)
 
     print(f"[wheels] placing {2 * len(sides)} corners ...")
     all_wheels = [
