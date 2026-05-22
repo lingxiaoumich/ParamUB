@@ -64,8 +64,12 @@ class UnderbodySpec:
 
     Wheelhouses (per-axle clearances + fillets)
         wheel_house_axial_clearance_mm:   radial gap tire OD -> arch ID.
-        wheel_house_thickness_mm:         shell thickness (solid mode only;
-                                          surface mode is zero-thickness).
+        wheel_house_thickness_mm:         intermediate shell thickness; the
+                                          wheelhouse builder constructs a
+                                          solid internally and then extracts
+                                          its outer faces, so this stays
+                                          relevant even though the floor is
+                                          zero-thickness.
         wheel_house_lateral_clearance_mm: base Y clearance per side.
         front_steering_clearance_mm:      extra Y on front arches.
         rear_steering_clearance_mm:       extra Y on rear arches.

@@ -69,13 +69,15 @@
   ignored.
 </p>
 <p>
-  The mirror feature exists for the front splitter:
+  The same machinery exists for the front splitter:
   <code>FloorSpec.splitter_sections</code> /
   <code>UnderbodySpec.splitter_sections</code> takes a list of
-  <code>SplitterSection</code> instances. It is the same construction at
-  the front of the car (with <code>kick_x</code> and
-  <code>front_x</code> instead of <code>rear_x</code>, and start tangent
-  along <strong>+X</strong> instead of −X).
+  <code>SplitterSection</code> instances. It is the symmetric
+  construction at the front of the car — same Bezier parameterisation,
+  with <code>front_x_mm</code> / <code>front_z_mm</code> /
+  <code>front_angle_deg</code> instead of <code>rear_*</code>, and the
+  start tangent along <strong>+X</strong> (toward the front) instead of
+  <strong>−X</strong>. Either, both, or neither list can be set.
 </p>
 <div class="callout info">
   <strong>Independent N and Y.</strong> Splitter and diffuser are built
@@ -87,11 +89,18 @@
   floor's lateral edge.
 </div>
 <div class="callout info">
-  <strong>Tangency.</strong> Every Bezier starts with its first handle
-  pointing horizontally along −X (toward the rear), so the curve is
-  automatically tangent to the flat floor at the kickline. You don't
-  tune anything for this — it's a structural property of the
-  construction.
+  <strong>Tangency.</strong> Every diffuser Bezier starts horizontal in
+  −X (toward the rear); every splitter Bezier starts horizontal in +X
+  (toward the front). The flat floor is horizontal everywhere. So both
+  lofts meet the flat floor with C1 continuity at the kicklines by
+  construction — you don't tune anything for it.
+</div>
+<div class="callout info">
+  <strong>Left-half output (<code>half_only=True</code>).</strong>
+  Multisection lofts work in either full-car or left-half mode. With
+  <code>half_only=True</code>, the body is sliced at y=0 after the loft;
+  the splitter, flat floor, and diffuser are all carried into the half
+  cleanly.
 </div>
 
 <h2 id="layers">Three-layer API</h2>

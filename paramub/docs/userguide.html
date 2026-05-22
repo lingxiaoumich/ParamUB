@@ -12,7 +12,8 @@
   <h1>ParamUB</h1>
   <p class="subtitle">
     Parametric car underbody generator built on CadQuery. One dataclass in,
-    STL + preview out.
+    STL + preview out. Optional front splitter and rear diffuser are
+    constructed as multisection Bezier lofts.
   </p>
 </header>
 
@@ -31,6 +32,8 @@ generate(
                                   # "all"  -> ub.stl + ub_preview.png + ub.log + ub.json
     output_parts=True,            # also emit FLOOR.STL + WHEEL_FL/FR/RL/RR.STL
     export_step=True,             # also emit ub.step  (+ part STEPs when output_parts)
+    half_only=True,               # build &amp; output only the left half (y &lt; 0).
+                                  # False (default) builds the full car.
 )
 </code></pre>
 
@@ -39,16 +42,20 @@ generate(
   <thead><tr><th>File</th><th>When</th><th>Contents</th></tr></thead>
   <tbody>
     <tr><td><code>&lt;stem&gt;.stl</code></td><td>always</td>
-        <td>Merged assembly (floor + wheelhouses + 4 wheels).</td></tr>
+        <td>Merged assembly (floor + wheelhouses + 4 wheels, or 2 wheels if
+            <code>half_only</code>).</td></tr>
     <tr><td><code>&lt;stem&gt;_preview.png</code></td><td><code>output_mode="all"</code></td>
         <td>8-panel composite: iso, top, front elevation, Y=0 section, front+rear axle sections, front+rear tire details, plus parameter footer.</td></tr>
     <tr><td><code>&lt;stem&gt;.log</code></td><td><code>output_mode="all"</code></td>
         <td>Mirrored stdout/stderr.</td></tr>
     <tr><td><code>&lt;stem&gt;.json</code></td><td><code>output_mode="all"</code></td>
-        <td>Full spec tree as JSON.</td></tr>
+        <td>Full spec tree as JSON (including any splitter/diffuser sections).</td></tr>
     <tr><td><code>FLOOR.STL</code>, <code>WHEEL_FL.STL</code>, <code>WHEEL_FR.STL</code>, <code>WHEEL_RL.STL</code>, <code>WHEEL_RR.STL</code></td>
         <td><code>output_parts=True</code></td>
-        <td>One STL per assembly part. Filenames are fixed UPPERCASE.</td></tr>
+        <td>One STL per assembly part. Filenames are fixed UPPERCASE. The
+            FLOOR part uses a finer angular tolerance so the multisection
+            Bezier loft tessellates smoothly (see
+            <code>floor_angular_tolerance_rad</code> below).</td></tr>
     <tr><td><code>&lt;stem&gt;.step</code></td><td><code>export_step=True</code></td>
         <td>Merged BREP STEP file with named subparts (no tessellation; opens cleanly in any CAD tool).</td></tr>
     <tr><td><code>FLOOR.STEP</code>, <code>WHEEL_FL.STEP</code>, … <code>WHEEL_RR.STEP</code></td>
@@ -57,21 +64,52 @@ generate(
   </tbody>
 </table>
 
+<h3>Tessellation tolerances</h3>
+<table>
+  <thead><tr><th>generate() arg</th><th class="num">Default</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>stl_tolerance_mm</code></td>
+      <td class="num">0.1</td>
+      <td>Linear chord tolerance — controls flat-surface chord error.</td>
+    </tr>
+    <tr>
+      <td><code>stl_angular_tolerance_rad</code></td>
+      <td class="num">0.1</td>
+      <td>Angular chord tolerance applied to the merged STL and to per-part
+          wheel STLs. Coarser ⇒ faster, smaller files.</td>
+    </tr>
+    <tr>
+      <td><code>floor_angular_tolerance_rad</code></td>
+      <td class="num">0.02</td>
+      <td>Finer angular tolerance applied ONLY to the FLOOR per-part STL
+          (and the merged STL's body face, via a body pre-mesh trick). Keeps
+          the multisection-diffuser Bezier loft smooth without making the
+          wheel parts pay the cost.</td>
+    </tr>
+  </tbody>
+</table>
+
 <h2>Spec layout</h2>
 <p>One root spec composes the whole thing. Edit any subspec independently.</p>
 <pre><code>UnderbodySpec
-├── vehicle plan        wheelbase_mm, front_overhang_mm, rear_overhang_mm,
-│                       track_front_mm, track_rear_mm
-├── ride / floor        ride_height_mm, floor_width_mm, floor_thickness_mm,
-│                       floor_angle_deg
-├── diffuser            diffuser_start_x_mm (None = rear axle),
-│                       diffuser_angle_deg, diffuser_radius_mm
-├── wheelhouses         wheel_house_axial_clearance_mm,
-│                       wheel_house_lateral_clearance_mm,
-│                       front_steering_clearance_mm,
-│                       front_wheel_house_fillet_mm, rear_wheel_house_fillet_mm
-├── alignment           camber_front_deg, camber_rear_deg,
-│                       toe_front_deg, toe_rear_deg
+├── vehicle plan          wheelbase_mm, front_overhang_mm, rear_overhang_mm,
+│                         track_front_mm, track_rear_mm
+├── ride / floor          ride_height_mm, floor_width_mm, floor_angle_deg
+├── diffuser (legacy)     diffuser_start_x_mm (None = rear axle),
+│                         diffuser_angle_deg, diffuser_radius_mm
+├── splitter+diffuser     splitter_sections: list[SplitterSection] | None
+│   (multisection)        diffuser_sections: list[DiffuserSection] | None
+│                         When set, the corresponding piece is a Bezier
+│                         loft and the legacy fields above are ignored
+│                         for that piece. See the multisection guide.
+├── wheelhouses           wheel_house_axial_clearance_mm,
+│                         wheel_house_lateral_clearance_mm,
+│                         front_steering_clearance_mm, rear_steering_clearance_mm,
+│                         front_wheel_house_fillet_mm,  rear_wheel_house_fillet_mm,
+│                         lateral_clearance_overrides_mm  (per-corner dict)
+├── alignment             camber_front_deg, camber_rear_deg,
+│                         toe_front_deg, toe_rear_deg
 └── wheel: WheelSpec
     ├── tire:  TireSpec   (section_width, aspect_ratio, rim_diameter_in,
     │                       sidewall_bulge, shoulder_radius, tread_width,
@@ -85,6 +123,8 @@ UnderbodySpec.rear_wheel = WheelSpec(...)  # None -> reuse front wheel
 </code></pre>
 
 <h2>Common tweaks</h2>
+
+<h3>Legacy angle + radius diffuser</h3>
 <pre><code>from paramub import generate, UnderbodySpec, WheelSpec, TireSpec, SpokeSpec
 
 spec = UnderbodySpec(
@@ -100,13 +140,86 @@ spec = UnderbodySpec(
 generate(spec, output_dir="outputs/sport", stem="sport", output_mode="all")
 </code></pre>
 
+<h3>Multisection splitter + diffuser</h3>
+<pre><code>from paramub import (
+    generate, UnderbodySpec, WheelSpec, TireSpec, SpokeSpec,
+    DiffuserSection, SplitterSection,
+)
+
+spec = UnderbodySpec(
+    wheelbase_mm=2700.0,
+    floor_width_mm=1800.0,
+    splitter_sections=[
+        SplitterSection(y_mm=0,   kick_x_mm=1450, front_x_mm=2200,
+                        front_z_mm=150, front_angle_deg=5,
+                        start_strength=0.30, end_strength=0.30),
+        SplitterSection(y_mm=900, kick_x_mm=1400, front_x_mm=2200,
+                        front_z_mm=180, front_angle_deg=8,
+                        start_strength=0.25, end_strength=0.25),
+    ],
+    diffuser_sections=[
+        DiffuserSection(y_mm=0,   kick_x_mm=-1350, rear_x_mm=-2150,
+                        rear_z_mm=200, rear_angle_deg=8,
+                        start_strength=0.37, end_strength=0.37),
+        DiffuserSection(y_mm=900, kick_x_mm=-1200, rear_x_mm=-2150,
+                        rear_z_mm=300, rear_angle_deg=12,
+                        start_strength=0.21, end_strength=0.26),
+    ],
+)
+generate(spec, output_dir="outputs/multi", stem="multi",
+         output_mode="all", output_parts=True, half_only=True)
+</code></pre>
+<p>
+  See the
+  <a href="multisection_diffuser.html"><strong>multisection diffuser &amp;
+  splitter guide</strong></a> for the full Bezier parameterisation (the
+  three-layer API <code>cubic_bezier_edge</code> /
+  <code>cubic_bezier_from_tangents</code> /
+  <code>DiffuserSection</code>+<code>SplitterSection</code>), the
+  shape cookbook, and the construction details.
+</p>
+
+<h2>Left-half mode (<code>half_only</code>)</h2>
+<p>
+  Setting <code>half_only=True</code> on <code>generate()</code> (or
+  <code>build_underbody()</code>) produces only the left side of the car
+  (y &lt; 0) — two wheels, half the floor, half the wheelhouses, with the
+  body sliced at y = 0. Useful for symmetric CFD setups where only one
+  half is meshed.
+</p>
+
+<h2>Standalone Bezier primitives</h2>
+<p>
+  The cubic Bezier construction used by the splitter and diffuser is
+  exposed in two reusable layers, independent of the underbody:
+</p>
+<pre><code>from paramub import cubic_bezier_edge, cubic_bezier_from_tangents
+import cadquery as cq
+
+# Layer 1 — explicit 4-point cubic Bezier:
+edge = cubic_bezier_edge(cq.Vector(0,0,0), cq.Vector(100,0,0),
+                          cq.Vector(150,0,80), cq.Vector(200,0,100))
+
+# Layer 2 — endpoints + outgoing tangents + relative handle strengths:
+edge = cubic_bezier_from_tangents(
+    p0 = cq.Vector(0, 0, 0),
+    p3 = cq.Vector(200, 0, 100),
+    t0 = cq.Vector(1, 0, 0),          # leaves P0 along +X
+    t3 = cq.Vector(0, 0, 1),          # arrives at P3 going +Z
+    start_strength = 0.4,             # |P0-P1| = 0.4 * |P3-P0|
+    end_strength   = 0.4,
+)
+</code></pre>
+
 <h2>Full parameter reference</h2>
 <p>Per-builder guides with labeled diagrams and complete parameter tables:</p>
 <ul>
   <li><a href="tire_builder.html">tire_builder</a> — tire cross-section</li>
   <li><a href="spoke_builder.html">spoke_builder</a> — disc, spoke windows, rim barrel</li>
   <li><a href="wheelhouse_builder.html">wheelhouse_builder</a> — arch shape, fillets, trim</li>
-  <li><a href="floor_builder.html">floor_builder</a> — floor + diffuser geometry</li>
+  <li><a href="floor_builder.html">floor_builder</a> — floor + diffuser geometry (legacy)</li>
+  <li><a href="multisection_diffuser.html">multisection_diffuser</a> —
+      front splitter + rear diffuser as Bezier lofts</li>
 </ul>
 
 <h2>Upper-shell extraction</h2>
@@ -123,6 +236,26 @@ python run_shell.py --input data/car.stl --output-dir outputs/shell
 <p>See the <a href="shell_extract.html">shell_extract guide</a> for the
 full seven-step walkthrough with per-step renders, the visibility
 classifier, the cut-zone guard, and all tuning knobs.</p>
+
+<h2>Integrating with a reconstructed shell</h2>
+<p>
+  <code>integrate_underbody.py</code> wires the parametric generator to
+  a shell extracted by <code>run_shell.py</code>: it measures the
+  shell's front and rear edges at chosen Y values, anchors a
+  multisection splitter + diffuser to those measurements, generates the
+  underbody at the shell's scale, transforms it into the shell frame,
+  takes the left half, and trims its perimeter to the shell's lower
+  silhouette.
+</p>
+<pre><code>python integrate_underbody.py \
+    --shell-meta outputs/shell/&lt;name&gt;_meta.json \
+    --output-dir outputs/integrate
+</code></pre>
+<p>
+  See the docstring of <code>integrate_underbody.py</code> for the full
+  pipeline (frame conventions, anchor measurement, spec construction,
+  boundary trim).
+</p>
 
 <footer>ParamUB — see <code>paramub/</code> for source. Frozen prototypes live in <code>paramub/debug/</code>.</footer>
 </main>

@@ -50,8 +50,11 @@ class WheelhouseSpec:
         axial_clearance_mm:  radial gap between tire OD and arch inner wall.
         lateral_clearance_mm: extra Y per side (includes steering clearance
                               on a front wheel).
-        thickness_mm:        shell thickness (used as fallback in solid mode;
-                              the surface output has zero thickness).
+        thickness_mm:        intermediate shell thickness; only used inside
+                              the wheelhouse solid construction (the final
+                              surface-mode output is zero-thickness, with
+                              outer faces extracted from the intermediate
+                              solid).
         fillet_mm:           tangent fillet radius on the inboard cap's
                               upper outline. 0 disables.
 

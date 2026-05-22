@@ -15,8 +15,11 @@
     feed builder 3 (wheel); builders 4–5 plus four wheels feed builder 6
     (underbody). A separate <a href="shell_extract.html">shell-extraction</a>
     pre-processor strips wheels and underbody from a reconstructed
-    whole-car mesh so the upper shell can be merged with this generated
-    underbody.
+    whole-car mesh; the <code>integrate_underbody.py</code> driver
+    bridges the two — measures the shell's silhouette, builds a
+    matching parametric underbody (multisection Bezier splitter +
+    diffuser), aligns frames, trims to the shell's perimeter, and
+    writes a combined STL.
   </p>
 </header>
 
@@ -65,7 +68,8 @@
 <p>
   A single function takes one combined spec and writes either an STL
   file or a full bundle (STL + 5-view PNGs + composite preview + log +
-  parameter JSON):
+  parameter JSON). The <a href="userguide.html">user guide</a> has full
+  examples; the short form:
 </p>
 <pre><code>from paramub import generate, UnderbodySpec
 
@@ -74,11 +78,32 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="stl")
 
 # Full bundle: STL + view PNGs + composite preview + log + spec.json
 generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
+
+# Left half only (y &lt; 0) — symmetric CFD setups
+generate(UnderbodySpec(), output_dir="out", stem="ub_half", half_only=True)
 </code></pre>
 <div class="callout info">
   The renderer runs in a subprocess (PyVista / OCP llvmpipe conflict).
   See <code>paramub/_render_views.py</code>.
 </div>
+
+<h2>Integrating with a reconstructed shell</h2>
+<p>
+  <code>integrate_underbody.py</code> at the repo root ties the
+  generator to a shell extracted by <code>run_shell.py</code>: probes
+  the shell at <code>Y = 0</code> and <code>Y = 700</code> for the
+  front and rear lowest-edge anchors, builds matching multisection
+  splitter + diffuser sections pinned to those anchors, generates the
+  underbody at the shell's scale, transforms it into the shell frame
+  (mirroring +X), takes the left half, and trims its perimeter to the
+  shell's lower silhouette (2D concave hull of the open-edge points).
+  Writes the trimmed underbody + a combined shell+UB STL + debug
+  renders.
+</p>
+<pre><code>python integrate_underbody.py \
+    --shell-meta outputs/shell/&lt;name&gt;_meta.json \
+    --output-dir outputs/integrate
+</code></pre>
 
 <h2>Layout</h2>
 <pre><code>paramub/
@@ -86,9 +111,11 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
 ├── spoke_builder.py           # 2 — SpokeSpec, build_spoke_disc, cut_spoke_windows, build_rim_barrel
 ├── wheel_assem.py             # 3 — WheelSpec, assemble_wheel
 ├── wheelhouse_builder.py      # 4 — WheelhouseSpec, build_wheelhouse_solid, extract_wheelhouse_surfaces
-├── floor_builder.py           # 5 — FloorSpec, build_floor, build_below_cropper
-├── ub_assem.py                # 6 — UnderbodySpec, build_underbody
-├── generate.py                # generate(spec, output_mode)
+├── floor_builder.py           # 5 — FloorSpec, build_floor, build_below_cropper,
+│                              #     DiffuserSection, SplitterSection,
+│                              #     cubic_bezier_edge, cubic_bezier_from_tangents
+├── ub_assem.py                # 6 — UnderbodySpec, build_underbody (half_only=bool)
+├── generate.py                # generate(spec, output_mode, half_only, *_tolerance_*)
 ├── _render_views.py           # PyVista subprocess renderer (no CadQuery imports)
 ├── shell_extract.py           # upper-shell extraction (whole-car → upper shell)
 ├── shell_render.py            # 10-panel matplotlib renderer for shell steps
@@ -99,6 +126,7 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
 │   ├── spoke_builder.html
 │   ├── wheelhouse_builder.html
 │   ├── floor_builder.html
+│   ├── multisection_diffuser.html  # multisection splitter + diffuser API
 │   ├── shell_extract.html
 │   ├── _style.css
 │   ├── _make_diagrams.py
@@ -107,6 +135,9 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
 
 # Repo root
 run_shell.py                   # driver for the shell-extraction pipeline
+integrate_underbody.py         # bridge shell + parametric UB (anchored splitter + diffuser)
+makeUB.py                      # plain example: full-spec UnderbodySpec → generate()
+makeUB_example.py              # smoke-test driver for multisection / splitter / both / mixed modes
 </code></pre>
 
 <footer>ParamUB — auto-generated documentation.</footer>

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ParamUB — Floor Builder</title>
+<title>ParamUB — Floor &amp; Diffuser Builder</title>
 <link rel="stylesheet" href="_style.css">
 </head>
 <body>
@@ -11,67 +11,122 @@
   <div class="tag">Builder 5 of 6</div>
   <h1>Floor &amp; Diffuser Builder</h1>
   <p class="subtitle">
-    Flat underbody floor + tangent-filleted rear diffuser ramp.
-    Returns either a zero-thickness <code>Face</code> (CFD surface mode)
-    or a thin solid slab.
+    Flat underbody floor + rear diffuser (and optional front splitter).
+    Output is a zero-thickness <code>Face</code> in the simple case
+    (legacy angle + radius diffuser), or a sewn <code>Shell</code> when
+    using multisection Bezier lofts for the splitter and/or diffuser.
   </p>
 </header>
 
 <nav class="toc">
   <strong>Contents</strong>
   <ul>
-    <li><a href="#overview">Overview</a></li>
-    <li><a href="#section">XZ underside contour</a></li>
-    <li><a href="#plan">XY plan</a></li>
-    <li><a href="#params">Parameter reference</a></li>
+    <li><a href="#overview">Overview &amp; dispatch</a></li>
+    <li><a href="#legacy">Legacy: angle + radius diffuser</a></li>
+    <li><a href="#multisection">Multisection: Bezier splitter + diffuser</a></li>
+    <li><a href="#plan">Plan view</a></li>
+    <li><a href="#params">Legacy parameter reference</a></li>
     <li><a href="#below">below-cropper helper</a></li>
     <li><a href="#usage">Usage</a></li>
     <li><a href="#notes">Implementation notes</a></li>
   </ul>
 </nav>
 
-<h2 id="overview">Overview</h2>
+<h2 id="overview">Overview &amp; dispatch</h2>
 <p>
-  The floor is built in two modes, picked by <code>floor_thickness_mm</code>:
+  <code>build_floor(FloorSpec)</code> returns the underbody underside as
+  a zero-thickness CadQuery surface. There are two construction modes,
+  picked automatically from <code>FloorSpec</code>:
 </p>
 <table>
-  <thead><tr><th>Value</th><th>Returns</th><th>Use for</th></tr></thead>
+  <thead>
+    <tr><th>When</th><th>Mode</th><th>Returns</th></tr>
+  </thead>
   <tbody>
-    <tr><td><code>== 0</code></td><td>cq.Face</td>
-        <td>CFD/aero surface meshes (single-sided triangle mesh; mesher extrudes wall thickness).</td></tr>
-    <tr><td><code>&gt; 0</code></td><td>cq.Workplane (Solid)</td>
-        <td>Closed thin slab — directly printable / unioned with arches in solid mode.</td></tr>
+    <tr>
+      <td>both <code>splitter_sections</code> and
+          <code>diffuser_sections</code> are <code>None</code></td>
+      <td><strong>Legacy</strong>: single XZ contour
+          (flat → tangent-filleted arc → ramp) swept across the floor width.</td>
+      <td>One <code>cq.Face</code> (ruled surface).</td>
+    </tr>
+    <tr>
+      <td>either <code>splitter_sections</code> or
+          <code>diffuser_sections</code> is set</td>
+      <td><strong>Multisection</strong>: independent Bezier lofts for the
+          splitter (front) and diffuser (rear), sewn to a flat middle
+          floor at the extracted kicklines.</td>
+      <td>A sewn <code>Shell</code> of up to three faces (splitter loft +
+          flat floor + diffuser loft).</td>
+    </tr>
   </tbody>
 </table>
-<p>
-  Both modes draw the same underside contour in the XZ plane and sweep /
-  extrude it across the floor width.
-</p>
+<div class="callout info">
+  Solid-mode floor (a thin slab) was removed. CFD / aero meshers extrude
+  wall thickness themselves; the parametric floor is always a zero-thickness
+  Face / Shell.
+</div>
 
-<h2 id="section">XZ underside contour</h2>
+<h2 id="legacy">Legacy: angle + radius diffuser</h2>
+<p>
+  When neither <code>splitter_sections</code> nor
+  <code>diffuser_sections</code> is set, the floor is built from a
+  single XZ contour at Y = 0:
+</p>
 <div class="figure">
   <img src="diagrams/floor_section.png" alt="Floor + diffuser XZ contour">
   <span class="caption">
     Underside profile at Y = 0 — flat floor → tangent fillet →
-    inclined diffuser ramp. The fillet&rsquo;s tangent points are computed
+    inclined diffuser ramp. The fillet's tangent points are computed
     from <code>diffuser_radius_mm</code> and <code>diffuser_angle_deg</code>
     so the three segments meet smoothly with no kinks. Note the Z axis is
     not to scale with X.
   </span>
 </div>
+<p>
+  The contour is swept across <code>floor_width_mm</code> as a ruled
+  surface — every Y has the same XZ profile. There is no front splitter.
+</p>
 
-<h2 id="plan">XY plan</h2>
+<h2 id="multisection">Multisection: Bezier splitter + diffuser</h2>
+<p>
+  Set <code>FloorSpec.splitter_sections</code> and/or
+  <code>FloorSpec.diffuser_sections</code> to a list of
+  <code>SplitterSection</code> / <code>DiffuserSection</code> instances
+  to lift the diffuser (and add a front splitter) to a properly
+  laterally-varying surface lofted from per-Y Bezier cross-sections.
+</p>
+<p>
+  The full API — the three-layer Bezier primitives, the section
+  parameters, the cookbook of shape adjustments, and a complete
+  worked example — is on its own page:
+</p>
+<p>
+  →&nbsp;<a href="multisection_diffuser.html"><strong>Multisection
+  diffuser &amp; splitter guide</strong></a>
+</p>
+
+<h2 id="plan">Plan view</h2>
 <div class="figure">
   <img src="diagrams/floor_plan.png" alt="Floor XY plan">
   <span class="caption">
     Plan view of the floor — a rectangle of <code>floor_width_mm</code>
     by <code>(floor_x_max − floor_x_min)</code>. The underbody assembler
     cuts wheelhouse footprints (red rectangles) into this rectangle so
-    each wheel can pass through.
+    each wheel can pass through. The multisection variant uses the same
+    Y-span; the only plan-shape change is that the splitter and diffuser
+    kicklines can be slanted (per-section <code>kick_x_mm</code>) instead
+    of straight across.
   </span>
 </div>
 
-<h2 id="params">Parameter reference</h2>
+<h2 id="params">Legacy parameter reference</h2>
+<p>
+  See <a href="multisection_diffuser.html">the multisection guide</a>
+  for the new splitter/diffuser-section parameters. The legacy fields
+  below still drive the simple angle + radius diffuser when no
+  multisection lists are set.
+</p>
 
 <h3>Plan</h3>
 <table>
@@ -88,18 +143,16 @@
   </tbody>
 </table>
 
-<h3>Ride / form</h3>
+<h3>Ride</h3>
 <table>
   <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
   <tbody>
     <tr><td><code>ride_height_mm</code></td><td class="num">100</td><td>mm</td>
         <td>Ground to floor underside (Z = 0 is ground).</td></tr>
-    <tr><td><code>floor_thickness_mm</code></td><td class="num">0</td><td>mm</td>
-        <td>0 → surface mode (Face). &gt;0 → solid slab of that thickness.</td></tr>
   </tbody>
 </table>
 
-<h3>Diffuser</h3>
+<h3>Diffuser (legacy)</h3>
 <table>
   <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
   <tbody>
@@ -114,24 +167,46 @@
   </tbody>
 </table>
 
+<h3>Multisection (optional)</h3>
+<table>
+  <thead><tr><th>Parameter</th><th class="num">Default</th><th>Type</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>splitter_sections</code></td><td class="num">None</td>
+        <td><code>list[SplitterSection]</code></td>
+        <td>Front splitter as Bezier loft. See
+            <a href="multisection_diffuser.html">multisection guide</a>.</td></tr>
+    <tr><td><code>diffuser_sections</code></td><td class="num">None</td>
+        <td><code>list[DiffuserSection]</code></td>
+        <td>Rear diffuser as Bezier loft. Overrides the legacy
+            angle + radius fields above when set.</td></tr>
+  </tbody>
+</table>
+
 <h2 id="below">below-cropper helper</h2>
 <p>
   <code>build_below_cropper(spec)</code> returns a solid half-space below
   the underbody underside (extending well past the floor edges in X and
-  ±1.5 × floor_width in Y). The wheelhouse builder uses it to crop arch
-  faces so the rear arches follow the diffuser slope instead of hanging
-  out below it.
+  Y). The wheelhouse builder uses it to crop arch faces so the rear
+  arches follow the diffuser slope instead of hanging out below it.
+</p>
+<p>
+  The legacy version uses the analytic XZ contour. The multisection
+  version extrudes each face of the lofted Shell straight downward by
+  2 m and fuses them, so the cropper matches the lofted geometry
+  exactly.
 </p>
 <div class="callout info">
-  This is shared infrastructure — the floor and wheelhouse builders agree
-  on exactly the same contour because both call <code>_diff_geometry()</code>
-  internally.
+  Both modes are shared infrastructure — the floor builder and the
+  cropper helper agree on the same contour by construction (legacy uses
+  the same <code>_diff_geometry()</code> helper; multisection extrudes
+  the actual floor faces).
 </div>
 
 <h2 id="usage">Usage</h2>
+
+<h3>Legacy (default)</h3>
 <pre><code>from paramub import FloorSpec, build_floor
 
-# Surface mode (zero-thickness Face)
 spec = FloorSpec(
     floor_x_min=-2150, floor_x_max=2200,
     diffuser_start_x_mm=-1350,
@@ -139,34 +214,61 @@ spec = FloorSpec(
     diffuser_radius_mm=500,
 )
 face = build_floor(spec)        # cq.Face
+</code></pre>
 
-# Solid slab mode
-spec2 = FloorSpec(
+<h3>Multisection</h3>
+<pre><code>from paramub import FloorSpec, build_floor, DiffuserSection, SplitterSection
+
+spec = FloorSpec(
     floor_x_min=-2150, floor_x_max=2200,
-    diffuser_start_x_mm=-1350,
-    floor_thickness_mm=4,
+    floor_width_mm=1800,
+    diffuser_sections=[
+        DiffuserSection(y_mm=0,   kick_x_mm=-1350, rear_x_mm=-2150,
+                        rear_z_mm=200, rear_angle_deg=8,
+                        start_strength=0.37, end_strength=0.37),
+        DiffuserSection(y_mm=900, kick_x_mm=-1200, rear_x_mm=-2150,
+                        rear_z_mm=300, rear_angle_deg=12,
+                        start_strength=0.21, end_strength=0.26),
+    ],
+    splitter_sections=[                 # optional
+        SplitterSection(y_mm=0,   kick_x_mm=1450, front_x_mm=2200,
+                        front_z_mm=150, front_angle_deg=5,
+                        start_strength=0.30, end_strength=0.30),
+        SplitterSection(y_mm=900, kick_x_mm=1400, front_x_mm=2200,
+                        front_z_mm=180, front_angle_deg=8,
+                        start_strength=0.25, end_strength=0.25),
+    ],
 )
-slab = build_floor(spec2)       # cq.Workplane wrapping a Solid
+shell = build_floor(spec)        # sewn cq.Shell
 </code></pre>
 
 <h2 id="notes">Implementation notes</h2>
 <div class="callout info">
-  <strong>True zero-thickness surface.</strong> In surface mode the floor
-  is a single ruled <code>Face</code> spanning ±floor_width / 2 in Y, with
-  wheelhouse cutouts boolean-removed by the underbody assembler. STL
-  exports cleanly as a single-sided triangle mesh — appropriate for CFD
-  meshers that extrude wall thickness themselves.
+  <strong>True zero-thickness surface.</strong> The floor is always a
+  Face (legacy) or sewn Shell (multisection) — no thickness. STL exports
+  cleanly as a single-sided triangle mesh; CFD meshers extrude wall
+  thickness themselves.
 </div>
 <div class="callout info">
-  <strong>Open-wire contour assembly.</strong> The underside contour is
-  built by hand from three <code>cq.Edge.makeLine</code> /
-  <code>makeThreePointArc</code> primitives and joined with
-  <code>cq.Wire.assembleEdges</code>. The shortcut of building a
-  <code>Workplane</code> chain and pulling <code>edges().vals()</code> only
-  returns the latest edge, not all of them — a real footgun.
+  <strong>Legacy open-wire contour assembly.</strong> The legacy
+  underside contour is built by hand from three <code>cq.Edge.makeLine</code>
+  / <code>makeThreePointArc</code> primitives and joined with
+  <code>cq.Wire.assembleEdges</code>. Building a <code>Workplane</code>
+  chain and pulling <code>edges().vals()</code> only returns the latest
+  edge, not all of them — a real footgun.
+</div>
+<div class="callout info">
+  <strong>Multisection construction.</strong> Splitter and diffuser are
+  each built as independent <code>BRepOffsetAPI_ThruSections</code>
+  lofts (ruled for N=2 sections, smooth for N≥3). The flat-floor face
+  is constructed planar at <code>ride_h</code> with boundary edges
+  EXTRACTED from each loft's kickline rail, so all three pieces are
+  sewn watertight via <code>BRepBuilderAPI_Sewing</code>. C1 tangency at
+  the kicklines is automatic — each Bezier starts with horizontal
+  tangent in X, and the flat floor is horizontal everywhere.
 </div>
 <div class="callout">
-  <strong>Diffuser geometry equations.</strong> Given
+  <strong>Legacy diffuser geometry equations.</strong> Given
   <code>α = diffuser_angle</code> and <code>R = diffuser_radius</code>:
   the fillet eats <code>R·tan(α/2)</code> off the flat portion along the
   floor, and that same distance is consumed along the ramp.

@@ -139,7 +139,9 @@ spec = UnderbodySpec(
 
     # ----- wheelhouses ------------------------------------------------
     wheel_house_axial_clearance_mm   = 30.0,    # tire OD -> arch ID
-    wheel_house_thickness_mm         = 6.0,     # solid mode only
+    wheel_house_thickness_mm         = 6.0,     # intermediate solid thickness
+                                                # (outer faces extracted; final
+                                                #  output is zero-thickness)
     wheel_house_lateral_clearance_mm = 35.0,    # base Y gap per side
     front_steering_clearance_mm      = 150.0,   # extra Y on front arches
     rear_steering_clearance_mm       = 0.0,

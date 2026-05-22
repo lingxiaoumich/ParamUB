@@ -11,6 +11,47 @@ canonical frame, takes the left half (y <= 0), trims its perimeter to
 the shell footprint, and writes a combined STL plus a 10-panel debug
 render.
 
+Pipeline (top-level ``main()``)
+===============================
+
+1. Load shell STL + metadata; pick ``SCALE = 2700 mm / wheelbase_shell``
+   so the model sits in ParamUB-style millimetres.
+2. :func:`extract_hints` — wheelbase, overhangs, track, tire OD,
+   ride height, wheelhouse-top z, rocker-line y, etc., all in mm.
+3. :func:`measure_shell_anchors` — probe the shell at Y=0 and Y=700
+   (lateral) and record the front-most and rear-most x extents plus
+   the lowest z within 50 mm of each extremity. These become the
+   splitter leading-edge and diffuser trailing-edge endpoints.
+4. :func:`lateral_clearance_overrides` — per-wheel
+   ``wheel_house_lateral_clearance`` so the arches reach (and slightly
+   overshoot) the shell's rocker line.
+5. :func:`build_spec` — assemble an :class:`paramub.UnderbodySpec`
+   with a 3-section multisection splitter + diffuser pinned to the
+   shell anchors. Splitter kick is at ``front_axle + 50 mm``; diffuser
+   kick is at ``rear_axle - 50 mm``. Each section's ``end_strength``
+   is capped per geometry so the Bezier never dips below the floor
+   (see :func:`_safe_end_strength` inside ``build_spec``).
+6. :func:`paramub.ub_assem.build_underbody` with ``half_only=True``.
+7. Export ParamUB STL, load as trimesh, :func:`subdivide_to_edge` at
+   25 mm so the boundary trim has small triangles to work with.
+8. :func:`align_to_shell_frame` — mirror X (ParamUB +X_forward becomes
+   shell +X_rearward) and shift so wheel midpoints align.
+9. :func:`keep_left_half` — slice at y=0 (the half_only-built UB still
+   covers the full Y span until this slice).
+10. Boundary extraction + trim:
+      :func:`extract_shell_boundary_loops_3d` returns the shell's open
+      edge loops in 3D for visualisation;
+      :func:`export_loops_as_curtain_stl` writes them as a 10 mm-tall
+      curtain STL (the ``*_boundary_3d.stl`` artefact);
+      :func:`extract_outer_boundary_polygon` computes a 2D concave hull
+      of the same open-edge endpoints (mirrored across y=0, clipped to
+      y<=0) — this is the polygon used by the actual trim;
+      :func:`trim_to_shell_boundary` drops UB faces whose any vertex
+      falls outside the polygon (all-vertices test — stricter than a
+      centroid test, no large faces straddling the boundary).
+11. Write the trimmed UB STL, combined (shell + UB) STL, debug PNGs,
+    and a JSON dump of the spec + hints + anchors.
+
 Coordinate / unit handling
 ==========================
 
@@ -35,10 +76,49 @@ We bridge the two by:
      keep outward normals consistent.
   3. Slice at y = 0 to keep the left half.
 
+Splitter / diffuser geometry tunables (build_spec keyword args)
+================================================================
+
+  y_intermediate              700.0 mm   — intermediate section Y.
+  length_extend_mm            100.0 mm   — splitter front_x / diffuser
+                                            rear_x extended past the
+                                            measured shell edge so the
+                                            boundary trim has material to
+                                            clip against.
+  width_extend_mm             100.0 mm   — outboard section sits at
+                                            ``max(y_intermediate, body_half)
+                                            + width_extend_mm``; floor
+                                            width = 2 * that.
+  splitter_kick_offset_mm      50.0 mm   — splitter kick X = front_axle +
+                                            offset (forward).
+  diffuser_kick_offset_mm      50.0 mm   — diffuser kick X = rear_axle -
+                                            offset (rearward).
+  splitter_front_angle_deg    +30.0      — leading-edge tangent angle
+                                            above +X (up).
+  diffuser_rear_angle_deg      +5.0      — trailing-edge tangent angle
+                                            above -X (up).
+  handle_strength               0.30     — relative Bezier handle length
+                                            (|P0-P1|/|P0-P3|). Capped per
+                                            section to keep the curve
+                                            above ride_h.
+
+Outputs (in ``--output-dir``)
+=============================
+
+  <stem>_underbody_left.stl     trimmed parametric UB in shell frame.
+  <stem>_combined_left.stl      shell + UB concatenated.
+  <stem>_boundary_3d.stl        shell open-edge loops as 10 mm curtains.
+  <stem>_boundary_xy.stl        2D trim polygon as a thin extruded wall.
+  <stem>_boundary.png           top-down debug of the trim polygon.
+  <stem>_combined.png           10-panel debug render of shell + UB.
+  <stem>_underbody_only.png     10-panel debug render of UB alone.
+  <stem>_integrate_meta.json    hints, anchors, spec, face counts.
+
 Usage::
 
     python integrate_underbody.py
     python integrate_underbody.py --shell-meta outputs/shell/<name>_meta.json
+    python integrate_underbody.py --no-render            # skip PNGs
 """
 
 from __future__ import annotations
