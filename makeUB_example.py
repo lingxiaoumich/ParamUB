@@ -4,12 +4,14 @@ Run with one of these modes (default: ``diffuser_n3``)::
 
     python makeUB_example.py diffuser_n2  | diffuser_n3
                              splitter_n2 | splitter_n3
-                             both_n3 | both_mixed
+                             both_n3 | both_mixed | varying_x
 
   diffuser_n2 / diffuser_n3 — diffuser only, 1 or 2 user sections
   splitter_n2 / splitter_n3 — splitter only, 1 or 2 user sections
   both_n3                   — splitter + diffuser, 2 user sections each
   both_mixed                — splitter N=3, diffuser N=2 (independent N test)
+  varying_x                 — splitter + diffuser with varying X at BOTH
+                              the kicklines and the front/rear endpoints
 """
 import sys
 
@@ -69,6 +71,50 @@ SPLIT_MID = SplitterSection(
     start_strength=0.28, end_strength=0.28,
 )
 
+# ---- varying_x set: BOTH kicklines and end points X positions vary
+#      across sections, to exercise the independent X-control. The
+#      flat floor's plan boundary is no longer a simple rectangle.
+
+# Splitter: centerline kicks later (further forward of front axle) and
+# extends past floor_x_max; outboard kicks earlier (less forward of
+# axle) and ends inside floor_x_max with a steeper lift.
+SPLIT_CTR_VAR = SplitterSection(
+    y_mm=0.0,
+    kick_x_mm=1500.0,    # 150 mm forward of front axle (1350)
+    front_x_mm=2300.0,   # extends 100 mm past floor_x_max (2200)
+    front_z_mm=130.0,
+    front_angle_deg=3.0,
+    start_strength=0.30, end_strength=0.30,
+)
+SPLIT_OUT_VAR = SplitterSection(
+    y_mm=900.0,
+    kick_x_mm=1300.0,    # 50 mm rearward of front axle
+    front_x_mm=2150.0,   # ends 50 mm inside floor_x_max
+    front_z_mm=200.0,
+    front_angle_deg=10.0,
+    start_strength=0.25, end_strength=0.25,
+)
+
+# Diffuser: centerline kicks rearward of rear axle, ends past
+# floor_x_min; outboard kicks much further forward and ends earlier
+# (so the diffuser is shorter and steeper outboard).
+DIFF_CTR_VAR = DiffuserSection(
+    y_mm=0.0,
+    kick_x_mm=-1400.0,   # 50 mm rearward of rear axle (-1350)
+    rear_x_mm=-2250.0,   # extends 100 mm past floor_x_min (-2150)
+    rear_z_mm=200.0,
+    rear_angle_deg=8.0,
+    start_strength=0.37, end_strength=0.37,
+)
+DIFF_OUT_VAR = DiffuserSection(
+    y_mm=900.0,
+    kick_x_mm=-1100.0,   # 250 mm forward of rear axle (early kick outboard)
+    rear_x_mm=-2050.0,   # ends 100 mm inside floor_x_min
+    rear_z_mm=350.0,     # higher exit outboard
+    rear_angle_deg=15.0,
+    start_strength=0.22, end_strength=0.28,
+)
+
 
 mode = sys.argv[1] if len(sys.argv) > 1 else "diffuser_n3"
 
@@ -89,6 +135,9 @@ elif mode == "both_n3":
 elif mode == "both_mixed":
     splitter_sections = [SPLIT_CTR, SPLIT_MID, SPLIT_OUT]   # N=3
     diffuser_sections = [DIFF_OUT]                          # N=2 (mirrored)
+elif mode == "varying_x":
+    splitter_sections = [SPLIT_CTR_VAR, SPLIT_OUT_VAR]
+    diffuser_sections = [DIFF_CTR_VAR, DIFF_OUT_VAR]
 else:
     raise SystemExit(f"unknown mode: {mode}")
 
