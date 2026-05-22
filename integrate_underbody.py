@@ -505,105 +505,6 @@ def keep_left_half(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 # Perimeter trim: drop underbody faces whose xy is far from the shell xy
 # ---------------------------------------------------------------------------
 
-def extract_lower_perimeter_3d(
-        shell_mm: trimesh.Trimesh,
-        z_frac: float = 0.25,
-        ignore_y_eps: float = 5.0,
-        min_component_size: int = 50,
-        ) -> tuple[np.ndarray, np.ndarray] | None:
-    """3D points + edges of the shell's lower perimeter (union of all
-    connected components of the open-edge graph with ≥
-    ``min_component_size`` vertices, after low-Z + y=0 filters).
-
-    Returns (pts, edges):
-        pts:   (N, 3) array of 3D vertices on the perimeter.
-        edges: (E, 2) array of local indices into ``pts`` — the actual
-               open-edge segments from the shell, preserved exactly
-               (no traversal / cycle ordering, so T-junctions and small
-               unclosed gaps don't break anything).
-
-    Strategy:
-        1. Collect open boundary edges (mesh edge → exactly one face).
-        2. Keep only edges entirely below
-           ``z_min + z_frac * (z_max − z_min)``.
-        3. Drop edges with both endpoints near y=0 (the symmetry cut).
-        4. Take the largest connected component (by vertex count) —
-           discards isolated stub loops the user flagged.
-    """
-    sh = trimesh.Trimesh(
-        vertices=shell_mm.vertices.copy(),
-        faces=shell_mm.faces.copy(),
-        process=True)
-    edges_sorted = sh.edges_sorted
-    unique, counts = np.unique(edges_sorted, axis=0, return_counts=True)
-    open_pairs = unique[counts == 1]
-    if len(open_pairs) == 0:
-        return None
-    v = sh.vertices
-
-    z_min, z_max = float(v[:, 2].min()), float(v[:, 2].max())
-    z_thresh = z_min + z_frac * (z_max - z_min)
-
-    a = v[open_pairs[:, 0]]
-    b = v[open_pairs[:, 1]]
-    low_mask = (a[:, 2] < z_thresh) & (b[:, 2] < z_thresh)
-    not_y0 = ~((np.abs(a[:, 1]) < ignore_y_eps) &
-                (np.abs(b[:, 1]) < ignore_y_eps))
-    filtered = open_pairs[low_mask & not_y0]
-    print(f"[lower-perimeter] {len(filtered)}/{len(open_pairs)} open edges "
-          f"after low-Z (z<{z_thresh:.0f}) + y=0 filters")
-    if len(filtered) < 3:
-        return None
-
-    from collections import defaultdict
-    adj: dict[int, set[int]] = defaultdict(set)
-    for i, j in filtered:
-        i_, j_ = int(i), int(j)
-        adj[i_].add(j_)
-        adj[j_].add(i_)
-
-    visited: set[int] = set()
-    components: list[set[int]] = []
-    for start in list(adj.keys()):
-        if start in visited:
-            continue
-        comp: set[int] = set()
-        stack = [start]
-        while stack:
-            n = stack.pop()
-            if n in visited:
-                continue
-            visited.add(n)
-            comp.add(n)
-            stack.extend(m for m in adj[n] if m not in visited)
-        components.append(comp)
-
-    sizes = sorted((len(c) for c in components), reverse=True)
-    big_components = [c for c in components if len(c) >= min_component_size]
-    big_sizes = sorted((len(c) for c in big_components), reverse=True)
-    print(f"[lower-perimeter] {len(components)} components total "
-          f"(sizes top10: {sizes[:10]}); keeping {len(big_components)} "
-          f"with ≥ {min_component_size} verts (sizes: {big_sizes})")
-
-    kept_set: set[int] = set()
-    for c in big_components:
-        kept_set.update(c)
-    if not kept_set:
-        return None
-    kept_list = sorted(kept_set)
-    local_idx = {g: i for i, g in enumerate(kept_list)}
-    pts = v[kept_list].astype(np.float64)
-    edges_local: list[list[int]] = []
-    for i, j in filtered:
-        ii, jj = int(i), int(j)
-        if ii in kept_set and jj in kept_set:
-            edges_local.append([local_idx[ii], local_idx[jj]])
-    edges_arr = np.asarray(edges_local, dtype=np.int64)
-    print(f"[lower-perimeter] {len(pts)} pts, {len(edges_arr)} edges across "
-          f"{len(big_components)} components")
-    return pts, edges_arr
-
-
 def extract_shell_boundary_loops_3d(
         shell_mm: trimesh.Trimesh, min_points: int = 10,
         ignore_y_eps: float = 5.0) -> list[np.ndarray]:
@@ -637,29 +538,6 @@ def extract_shell_boundary_loops_3d(
             continue       # artificial y=0 cut
         loops.append(pts)
     return loops
-
-
-def export_edges_as_curtain_stl(pts: np.ndarray, edges: np.ndarray,
-                                  out_path: Path, height: float = 10.0) -> None:
-    """Each input edge becomes a 2-triangle vertical strip extruded
-    down in Z by ``height`` mm. Produces a clean 3D ribbon following
-    the input edge set exactly (no ordering required)."""
-    if len(pts) == 0 or len(edges) == 0:
-        print(f"[curtain] no edges; skipping {out_path}")
-        return
-    n = len(pts)
-    bot = pts.copy()
-    bot[:, 2] -= height
-    verts = np.vstack([pts, bot])
-    faces = np.empty((len(edges) * 2, 3), dtype=np.int64)
-    for k, (i, j) in enumerate(edges):
-        faces[2 * k] = [i, j, j + n]
-        faces[2 * k + 1] = [i, j + n, i + n]
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    mesh.export(str(out_path), file_type="stl")
-    print(f"[curtain] wrote {out_path}  "
-          f"({len(pts)} pts, {len(edges)} edges → {len(faces)} tris, "
-          f"height={height:.0f}mm)")
 
 
 def export_loops_as_curtain_stl(loops: list[np.ndarray], out_path: Path,
@@ -868,122 +746,6 @@ def boundary_polygon_with_holes(shell_mm: trimesh.Trimesh,
           f"mm², {len(holes)} holes (post-mirror), "
           f"clipped area={clipped.area:.0f} mm² ({n_holes} holes after y≤0 clip)")
     return clipped
-
-
-def _densify_polyline(pts: np.ndarray, max_seg: float = 5.0) -> np.ndarray:
-    """Insert points so consecutive points are at most ``max_seg`` apart.
-    Used so a cKDTree nearest-point query against the densified polyline
-    gives a good approximation of distance-to-curve."""
-    if len(pts) < 2:
-        return pts
-    out = [pts[0]]
-    for i in range(len(pts) - 1):
-        a, b = pts[i], pts[i + 1]
-        d = float(np.linalg.norm(b - a))
-        if d <= max_seg:
-            out.append(b)
-            continue
-        n = int(np.ceil(d / max_seg))
-        for k in range(1, n + 1):
-            t = k / n
-            out.append(a + t * (b - a))
-    return np.array(out, dtype=np.float64)
-
-
-def _densify_edges(pts: np.ndarray, edges: np.ndarray,
-                    max_seg: float = 5.0) -> np.ndarray:
-    """Sample every edge at ``max_seg`` mm spacing so a cKDTree
-    nearest-point query against the result gives a good approximation
-    of distance-to-perimeter (not just distance-to-vertex)."""
-    out = [pts]
-    for i, j in edges:
-        a, b = pts[i], pts[j]
-        d = float(np.linalg.norm(b - a))
-        if d <= max_seg:
-            continue
-        n = int(np.ceil(d / max_seg))
-        ts = np.linspace(0.0, 1.0, n + 1)[1:-1]
-        out.append(a + np.outer(ts, b - a))
-    return np.vstack(out)
-
-
-def trim_to_3d_perimeter(underbody: trimesh.Trimesh,
-                          perimeter_pts: np.ndarray,
-                          perimeter_edges: np.ndarray,
-                          tube_radius_mm: float = 20.0,
-                          concave_ratio: float = 0.02,
-                          ) -> tuple[trimesh.Trimesh, object | None]:
-    """Trim UB by:
-
-        1. **2D polygon containment**: every UB vertex must lie inside
-           a polygon formed from the concave hull of the perimeter
-           points' XY (mirrored across y=0 for symmetric extraction,
-           then clipped to y ≤ 0).
-        2. **3D distance-to-perimeter**: every UB vertex must be at
-           least ``tube_radius_mm`` mm away from the perimeter edges
-           (the perimeter is densified at ``tube_radius / 4`` spacing
-           so the cKDTree nearest-point query is a good approximation
-           of edge distance, not just vertex distance).
-
-    The combination drops UB material outside the body silhouette AND
-    within ``tube_radius_mm`` of the body's lower edge — giving the
-    constant-width gap.
-    """
-    if perimeter_pts is None or len(perimeter_pts) < 3:
-        return underbody, None
-
-    from shapely.geometry import MultiPoint, Polygon, box
-    try:
-        from shapely import contains_xy
-    except ImportError:
-        from shapely.vectorized import contains as contains_xy
-
-    # 2D polygon from concave hull (mirror for symmetry).
-    xy = perimeter_pts[:, :2]
-    mirror = np.column_stack([xy[:, 0], -xy[:, 1]])
-    mp = MultiPoint(np.vstack([xy, mirror]))
-    try:
-        hull = mp.concave_hull(ratio=concave_ratio)
-    except AttributeError:
-        hull = mp.convex_hull
-    if hull.is_empty or hull.geom_type != "Polygon":
-        return underbody, None
-    b = hull.bounds
-    clip = box(b[0] - 100, b[1] - 100, b[2] + 100, 0.0)
-    poly = hull.intersection(clip)
-    if poly.is_empty:
-        poly = hull
-    if poly.geom_type == "MultiPolygon":
-        poly = max(poly.geoms, key=lambda g: g.area)
-    print(f"[trim-poly] concave hull (mirror+clip y≤0) area={poly.area:.0f} mm²")
-
-    # 3D distance test against densified perimeter edges.
-    densified = _densify_edges(perimeter_pts, perimeter_edges,
-                                max_seg=max(2.0, tube_radius_mm * 0.25))
-    from scipy.spatial import cKDTree
-    tree = cKDTree(densified)
-
-    verts = underbody.vertices
-    faces = underbody.faces
-    inside_poly = contains_xy(poly, verts[:, 0], verts[:, 1])
-    dists, _ = tree.query(verts)
-    far_from_perim = dists > tube_radius_mm
-    vert_keep = inside_poly & far_from_perim
-    face_keep = vert_keep[faces].all(axis=1)
-    keep_idx = np.flatnonzero(face_keep)
-    print(f"[trim] 3D-perimeter (concave-hull poly + R={tube_radius_mm:.0f}mm "
-          f"gap) -> keep {int(face_keep.sum()):,}/{len(faces):,} faces "
-          f"(dropped {int((~face_keep).sum()):,})")
-    if len(keep_idx) == 0:
-        return (trimesh.Trimesh(
-                    vertices=underbody.vertices[:0],
-                    faces=np.zeros((0, 3), dtype=np.int64),
-                    process=False),
-                poly)
-    kept = underbody.submesh([keep_idx], append=True)
-    if isinstance(kept, list):
-        kept = kept[0]
-    return kept, poly
 
 
 def trim_to_shell_boundary(underbody: trimesh.Trimesh,
@@ -1237,10 +999,6 @@ def parse_args():
                    help=f"Output directory (default {DEFAULT_OUTPUT_DIR}).")
     p.add_argument("--no-render", action="store_true",
                    help="Skip the matplotlib render (still writes STL).")
-    p.add_argument("--tube-radius", type=float, default=20.0,
-                   help="Trim gap radius (mm). UB faces within this distance "
-                        "of the shell's lower perimeter are removed, leaving a "
-                        "constant-width gap between UB and shell. Default 20.")
     return p.parse_args()
 
 
@@ -1314,34 +1072,36 @@ def main():
     # the previous full-mesh ray-up test, which kept floor area under
     # the hood/trunk that extended beyond the body's lower silhouette.
     base_for_debug = args.shell_meta.stem.replace("_meta", "")
-    # Extract the shell's lower perimeter as points + edges (largest
-    # connected component of low-Z open boundary edges, with the y=0
-    # symmetry cut filtered out).
-    result = extract_lower_perimeter_3d(shell_mm)
-    if result is None:
-        raise RuntimeError("extract_lower_perimeter_3d returned None — "
-                           "no usable lower perimeter in the shell")
-    perimeter_pts, perimeter_edges = result
-    # 3D curtain STL — the actual filtered shell edges, no ordering,
-    # no diagonal stitches. Open alongside the UB STL in Blender.
-    export_edges_as_curtain_stl(
-        perimeter_pts, perimeter_edges,
+    # Extract the shell's 3D open-edge loops for visualisation. trimesh
+    # breaks the outer silhouette into chained fragments at the wheel
+    # arches, so a single closed outer loop isn't directly available —
+    # the 2D trim polygon below still comes from the concave hull of
+    # all open-edge endpoints, which handles the broken outer cleanly.
+    loops3d = extract_shell_boundary_loops_3d(shell_mm)
+    print(f"[boundary] {len(loops3d)} open-edge loops in 3D")
+    # 3D curtain STL — the actual shell edges in 3D, going up around
+    # the wheel arches / following the rocker line / etc. Open this
+    # alongside the underbody STL in Blender to see the trim boundary
+    # in its true 3D location.
+    export_loops_as_curtain_stl(
+        loops3d,
         args.output_dir / f"{base_for_debug}_boundary_3d.stl",
         height=10.0,
     )
-    # 3D trim: polygon containment (concave hull of perimeter, mirrored
-    # for symmetry and clipped to y≤0) + 3D distance > tube_radius_mm.
-    ub_trim, polygon_used = trim_to_3d_perimeter(
-        ub_left, perimeter_pts, perimeter_edges,
-        tube_radius_mm=args.tube_radius)
-    if polygon_used is not None:
-        _dump_boundary_debug(
-            shell_mm, polygon_used,
-            args.output_dir / f"{base_for_debug}_boundary.png")
-        export_boundary_polygon_stl(
-            polygon_used,
-            args.output_dir / f"{base_for_debug}_boundary_xy.stl",
-            z_base=0.0, z_height=5.0)
+    # 2D trim polygon: concave hull of open-edge endpoints (handles the
+    # broken outer chain by sampling all points). The UB already gets
+    # wheelhouse openings from build_wheelhouse_solid, so we don't need
+    # holes here for the wheel arches — the outer silhouette alone is
+    # what drives the trim.
+    boundary = extract_outer_boundary_polygon(shell_mm)
+    _dump_boundary_debug(
+        shell_mm, boundary,
+        args.output_dir / f"{base_for_debug}_boundary.png")
+    export_boundary_polygon_stl(
+        boundary,
+        args.output_dir / f"{base_for_debug}_boundary_xy.stl",
+        z_base=0.0, z_height=5.0)
+    ub_trim = trim_to_shell_boundary(ub_left, boundary)
     print(f"[trim]  faces={len(ub_trim.faces):,}  "
           f"y range=({ub_trim.bounds[0,1]:.1f}, {ub_trim.bounds[1,1]:.1f})")
 
