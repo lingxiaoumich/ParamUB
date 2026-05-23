@@ -78,9 +78,6 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="stl")
 
 # Full bundle: STL + view PNGs + composite preview + log + spec.json
 generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
-
-# Left half only (y &lt; 0) — symmetric CFD setups
-generate(UnderbodySpec(), output_dir="out", stem="ub_half", half_only=True)
 </code></pre>
 <div class="callout info">
   The renderer runs in a subprocess (PyVista / OCP llvmpipe conflict).
@@ -90,20 +87,46 @@ generate(UnderbodySpec(), output_dir="out", stem="ub_half", half_only=True)
 <h2>Integrating with a reconstructed shell</h2>
 <p>
   <code>integrate_underbody.py</code> at the repo root ties the
-  generator to a shell extracted by <code>run_shell.py</code>: probes
-  the shell at <code>Y = 0</code> and <code>Y = 700</code> for the
-  front and rear lowest-edge anchors, builds matching multisection
-  splitter + diffuser sections pinned to those anchors, generates the
-  underbody at the shell's scale, transforms it into the shell frame
-  (mirroring +X), takes the left half, and trims its perimeter to the
-  shell's lower silhouette (2D concave hull of the open-edge points).
-  Writes the trimmed underbody + a combined shell+UB STL + debug
-  renders.
+  generator to the full-car upper shell extracted by
+  <code>run_shell.py</code>:
 </p>
-<pre><code>python integrate_underbody.py \
+<ol>
+  <li>Probe the shell at <code>Y = 0</code>, <code>Y =
+    front_wheel_y</code> and <code>Y = rear_wheel_y</code> for the
+    front- and rear-bumper-bottom anchors
+    (<code>measure_shell_anchors</code> picks the lowest-z vertex in
+    a 200&nbsp;mm-deep band at each end).</li>
+  <li>Build a 3-section multisection splitter + diffuser loft pinned
+    to those anchors (Y0 = centerline, Y1 = wheel center, Y2 outboard
+    section reuses Y1's shape).</li>
+  <li>Run <code>build_underbody(spec)</code> on the full car, transform
+    into the shell frame (mirror +X about the wheel midpoint).</li>
+  <li><strong>BREP cut</strong>: extrude the shrunk shell-rim polygon
+    vertically and intersect each CadQuery face with it
+    (<code>BRepAlgoAPI_Common</code>) so the cut boundary becomes an
+    analytical curve before STL tessellation. Default shrink 100&nbsp;mm
+    (configurable via <code>--cut-shrink-mm</code>).</li>
+  <li><strong>Isotropic remesh</strong> the trimmed underbody to
+    roughly the shell's median edge length using PyMeshLab's
+    <code>meshing_isotropic_explicit_remeshing</code>.</li>
+</ol>
+<p>
+  Outputs in <code>--output-dir</code>: <code>_shell.stl</code>,
+  <code>_underbody.stl</code> (untrimmed),
+  <code>_underbody_trimmed.stl</code> (BREP-cut + remeshed),
+  <code>_cut_polygon.stl</code> (debug wall), four
+  <code>_wheel_*.stl</code>, and
+  <code>_integrate_meta.json</code>.
+</p>
+<pre><code>LD_LIBRARY_PATH=$CONDA_PREFIX/lib python integrate_underbody.py \
     --shell-meta outputs/shell/&lt;name&gt;_meta.json \
     --output-dir outputs/integrate
 </code></pre>
+<p>
+  The <code>LD_LIBRARY_PATH</code> override is needed for PyMeshLab.
+  Pass <code>--no-remesh</code> to skip the final remesh and run with
+  the default system Python lib path.
+</p>
 
 <h2>Layout</h2>
 <pre><code>paramub/
@@ -114,10 +137,11 @@ generate(UnderbodySpec(), output_dir="out", stem="ub_half", half_only=True)
 ├── floor_builder.py           # 5 — FloorSpec, build_floor, build_below_cropper,
 │                              #     DiffuserSection, SplitterSection,
 │                              #     cubic_bezier_edge, cubic_bezier_from_tangents
-├── ub_assem.py                # 6 — UnderbodySpec, build_underbody (half_only=bool)
-├── generate.py                # generate(spec, output_mode, half_only, *_tolerance_*)
+├── ub_assem.py                # 6 — UnderbodySpec, build_underbody (full car)
+├── generate.py                # generate(spec, output_mode, *_tolerance_*)
 ├── _render_views.py           # PyVista subprocess renderer (no CadQuery imports)
 ├── shell_extract.py           # upper-shell extraction (whole-car → upper shell)
+├── shell_recut.py             # longest open-boundary loop → 3-D re-cut of canonical mesh
 ├── shell_render.py            # 10-panel matplotlib renderer for shell steps
 ├── docs/                      # ← you are here
 │   ├── index.html

@@ -44,31 +44,33 @@
   <a href="userguide.html"><code>generate</code></a> entry point.
 </p>
 <p>
-  The pipeline exploits the car's lateral symmetry — only the left half
-  (y ≤ 0) is processed. Each step modifies (or labels faces of) the working
-  mesh and writes an STL when run in debug mode. All renders below are
-  produced by <code>paramub.shell_render</code> (10-panel matplotlib
-  composite, Lambertian shading, per-step bounds).
+  The pipeline processes the <strong>full car</strong> (both sides). Step 2
+  (the y = 0 planar cut) was retired — every later step is symmetric across
+  y = 0 already and the planar cut was only a holdover from a half-car
+  workflow. Each step modifies (or labels faces of) the working mesh and
+  writes an STL when run in debug mode. All renders below are produced by
+  <code>paramub.shell_render</code> (10-panel matplotlib composite,
+  Lambertian shading, per-step bounds).
 </p>
 <table>
   <thead><tr><th>#</th><th>Function</th><th>Operation</th></tr></thead>
   <tbody>
     <tr><td>1</td><td><code>s1_canonicalize</code></td>
         <td>Detect input axes; rotate/translate to +x rearward, +y lateral, +z up; centre on x = 0; snap z = 0 to the ground.</td></tr>
-    <tr><td>2</td><td><code>s2_keep_left</code></td>
-        <td>Clean planar slice at y = 0; keep y ≤ 0 (left half).</td></tr>
-    <tr><td>3</td><td><code>s3_locate_wheel_xy</code></td>
-        <td>z-band cluster → 2 wheel footprint centres.</td></tr>
+    <tr><td>3</td><td><code>s3_locate_wheel_xy_full</code></td>
+        <td>z-band x-cluster split by sign(y) → 4 wheel footprint centres (full car).</td></tr>
     <tr><td>4</td><td><code>s4_locate_wheel_z</code></td>
         <td>Y-slab + component-from-contact + circle fit → hub centre + tire radius + axial half-width.</td></tr>
     <tr><td>5</td><td><code>s5_cylinder_remove</code></td>
         <td>Mark faces inside the tight tire cylinder; drop debris.</td></tr>
     <tr><td>6a</td><td><code>s6a_wheel_center_visibility</code></td>
-        <td>Cast Fibonacci-sphere rays from inside the wheel cavity → first-hit faces are inward wheelhouse surfaces; remove them in one pass.</td></tr>
+        <td>Cast Fibonacci-sphere rays from inside the wheel cavity → first-hit faces are inward wheelhouse surfaces; remove them in one pass. Ray directions are y-symmetric and the inboard origins flip with sign(y) so left and right are treated identically.</td></tr>
     <tr><td>6b</td><td><code>s6b_wheelhouse_zone_inward</code></td>
-        <td>Geometric backstop: remove inward-facing faces in an expanded wheelhouse zone (inboard side extended to y = 0).</td></tr>
+        <td>Geometric backstop: remove inward-facing faces in an expanded wheelhouse zone (inboard side extended to y = 0 from both sides).</td></tr>
     <tr><td>7</td><td><code>s7_classify_visibility</code></td>
         <td>Per-face two-hemisphere visibility classifier (KEEP / REMOVE / DROP), constrained to a <em>cut zone</em> so distant body parts can't be holed.</td></tr>
+    <tr><td>8</td><td><code>recut_with_longest_rim</code> (<code>paramub.shell_recut</code>)</td>
+        <td>Trace the longest open-boundary <em>component</em> of the step-7 shell; use its edges as a 3-D scissor on the canonical mesh to recover any faces that step 5–7 over-removed inside the rim.</td></tr>
   </tbody>
 </table>
 
@@ -98,32 +100,22 @@
   <code>frame.inverse_apply(v_canon)</code>.
 </div>
 
-<h2 id="step2">Step 2 — clean planar cut at y = 0</h2>
+<h2 id="step2">Step 2 — removed</h2>
 <p>
-  <code>s2_keep_left</code> uses
-  <code>trimesh.intersections.slice_mesh_plane</code> with
-  <code>cap=False</code> to slice the mesh at y = 0 and keep the y ≤ 0
-  half. Faces straddling the plane are split; new vertices are inserted
-  <em>exactly</em> on y = 0, producing a clean planar boundary loop that
-  survives the later debris drops because we tag faces touching this
-  plane with a <code>protect_mask</code>.
+  The y = 0 planar cut was retired. The remaining steps are symmetric
+  across y = 0 and operate on the full canonical mesh directly.
 </p>
-<div class="figure">
-  <img src="diagrams/shell/step2_left_half.png" alt="Step 2 — left half">
-  <span class="caption">
-    Left half (y ≤ 0) after the planar slice. The translucent green plane
-    is y = 0. Roughly 50 % of the original faces are kept; ~6 700 vertices
-    now lie exactly on the symmetry plane.
-  </span>
-</div>
 
-<h2 id="step3">Step 3 — wheel (x, y) footprints</h2>
+<h2 id="step3">Step 3 — wheel (x, y) footprints (full car)</h2>
 <p>
-  <code>s3_locate_wheel_xy</code> samples a thin z-band (default
+  <code>s3_locate_wheel_xy_full</code> samples a thin z-band (default
   <code>z_band_height = 0.02</code> × bounding-box height) just above
-  the ground and clusters the resulting face centroids along x into
-  <code>n_expected = 2</code> groups. Each cluster's (mean x, mean y)
-  gives the front-left and rear-left wheel footprint.
+  the ground, k-means-clusters the centroids along x into
+  <code>n_axles = 2</code> axles, then splits each axle cluster by
+  <code>sign(y)</code> so we get one wheel per (axle, side) corner —
+  4 wheels total. The earlier half-car helper
+  <code>s3_locate_wheel_xy</code> still exists for backwards compat but
+  is no longer used by <code>run_shell.py</code>.
 </p>
 <div class="figure">
   <img src="diagrams/shell/step3_wheel_xy.png" alt="Step 3 — wheel xy">

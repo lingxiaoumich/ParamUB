@@ -32,8 +32,6 @@ generate(
                                   # "all"  -> ub.stl + ub_preview.png + ub.log + ub.json
     output_parts=True,            # also emit FLOOR.STL + WHEEL_FL/FR/RL/RR.STL
     export_step=True,             # also emit ub.step  (+ part STEPs when output_parts)
-    half_only=True,               # build &amp; output only the left half (y &lt; 0).
-                                  # False (default) builds the full car.
 )
 </code></pre>
 
@@ -42,8 +40,7 @@ generate(
   <thead><tr><th>File</th><th>When</th><th>Contents</th></tr></thead>
   <tbody>
     <tr><td><code>&lt;stem&gt;.stl</code></td><td>always</td>
-        <td>Merged assembly (floor + wheelhouses + 4 wheels, or 2 wheels if
-            <code>half_only</code>).</td></tr>
+        <td>Merged assembly (floor + wheelhouses + 4 wheels).</td></tr>
     <tr><td><code>&lt;stem&gt;_preview.png</code></td><td><code>output_mode="all"</code></td>
         <td>8-panel composite: iso, top, front elevation, Y=0 section, front+rear axle sections, front+rear tire details, plus parameter footer.</td></tr>
     <tr><td><code>&lt;stem&gt;.log</code></td><td><code>output_mode="all"</code></td>
@@ -167,7 +164,7 @@ spec = UnderbodySpec(
     ],
 )
 generate(spec, output_dir="outputs/multi", stem="multi",
-         output_mode="all", output_parts=True, half_only=True)
+         output_mode="all", output_parts=True)
 </code></pre>
 <p>
   See the
@@ -177,15 +174,6 @@ generate(spec, output_dir="outputs/multi", stem="multi",
   <code>cubic_bezier_from_tangents</code> /
   <code>DiffuserSection</code>+<code>SplitterSection</code>), the
   shape cookbook, and the construction details.
-</p>
-
-<h2>Left-half mode (<code>half_only</code>)</h2>
-<p>
-  Setting <code>half_only=True</code> on <code>generate()</code> (or
-  <code>build_underbody()</code>) produces only the left side of the car
-  (y &lt; 0) — two wheels, half the floor, half the wheelhouses, with the
-  body sliced at y = 0. Useful for symmetric CFD setups where only one
-  half is meshed.
 </p>
 
 <h2>Standalone Bezier primitives</h2>

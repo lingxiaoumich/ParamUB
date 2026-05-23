@@ -174,6 +174,4 @@ if __name__ == "__main__":
                                            # (+ FLOOR.STEP, WHEEL_*.STEP when
                                            #  combined with output_parts=True)
         stl_tolerance_mm = 0.1,            # smaller = finer mesh, larger STL
-        half_only        = True,           # left (y<0) half only; flip to
-                                           # False to build the full car
     )

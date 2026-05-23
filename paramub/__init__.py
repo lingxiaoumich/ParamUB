@@ -14,9 +14,8 @@ Public modules (clean, refactored):
                        docs/multisection_diffuser.html),
                        cubic_bezier_edge(), cubic_bezier_from_tangents()
                        (standalone Bezier primitives)
-  ub_assem           — UnderbodySpec, build_underbody(spec, half_only=False)
+  ub_assem           — UnderbodySpec, build_underbody(spec)
   generate           — generate(spec, output_mode={'stl', 'all'},
-                                half_only=False,
                                 stl_tolerance_mm=0.1,
                                 stl_angular_tolerance_rad=0.1,
                                 floor_angular_tolerance_rad=0.02)

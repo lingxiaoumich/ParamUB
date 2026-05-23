@@ -1,64 +1,42 @@
-"""Integrate a parametric ParamUB underbody with an extracted upper shell.
+"""Generate a parametric underbody for a previously extracted upper shell.
 
-The shell pipeline (``run_shell.py``) produces:
-  * a single-component upper-body shell STL
-  * a metadata JSON with the canonical frame, wheel hubs, and per-step
-    face counts
+The shell extraction (``run_shell.py``) writes:
+  * ``<base>_final.stl``       — full-car upper shell (no y=0 cut)
+  * ``<base>_upper_recut.stl`` — re-cut version of the upper shell
+                                  with internal holes plugged
+  * ``<base>_meta.json``        — frame, wheel hubs, per-step counts
 
-This driver derives a matching parametric underbody from those hints,
-generates it via :mod:`paramub.ub_assem`, transforms it into the shell's
-canonical frame, takes the left half (y <= 0), trims its perimeter to
-the shell footprint, and writes a combined STL plus a 10-panel debug
-render.
+This script reads those, derives :class:`paramub.UnderbodySpec`
+parameters from the shell + meta, runs ``build_underbody`` on the
+full car (no half), and writes the resulting body + 4 wheels as STLs.
 
-Pipeline (top-level ``main()``)
-===============================
+No trimming, no y=0 capping, no shell ↔ UB combination — those steps
+are handled downstream now.
 
-1. Load shell STL + metadata; pick ``SCALE = 2700 mm / wheelbase_shell``
-   so the model sits in ParamUB-style millimetres.
-2. :func:`extract_hints` — wheelbase, overhangs, track, tire OD,
-   ride height, wheelhouse-top z, rocker-line y, etc., all in mm.
-3. :func:`measure_shell_anchors` — probe the shell at Y=0 and Y=700
-   (lateral) and record the front-most and rear-most x extents plus
-   the lowest z within 50 mm of each extremity. These become the
-   splitter leading-edge and diffuser trailing-edge endpoints.
-4. :func:`lateral_clearance_overrides` — per-wheel
-   ``wheel_house_lateral_clearance`` so the arches reach (and slightly
-   overshoot) the shell's rocker line.
-5. :func:`build_spec` — assemble an :class:`paramub.UnderbodySpec`
-   with a 3-section multisection splitter + diffuser pinned to the
-   shell anchors. Splitter kick is at ``front_axle + 50 mm``; diffuser
-   kick is at ``rear_axle - 50 mm``. Each section's ``end_strength``
-   is capped per geometry so the Bezier never dips below the floor
-   (see :func:`_safe_end_strength` inside ``build_spec``).
-6. :func:`paramub.ub_assem.build_underbody` with ``half_only=True``.
-7. Export ParamUB STL, load as trimesh, :func:`subdivide_to_edge` at
-   25 mm so the boundary trim has small triangles to work with.
-8. :func:`align_to_shell_frame` — mirror X (ParamUB +X_forward becomes
-   shell +X_rearward) and shift so wheel midpoints align.
-9. :func:`keep_left_half` — slice at y=0 (the half_only-built UB still
-   covers the full Y span until this slice).
-10. Boundary extraction + trim:
-      :func:`extract_shell_boundary_loops_3d` returns the shell's open
-      edge loops in 3D for visualisation;
-      :func:`export_loops_as_curtain_stl` writes them as a 10 mm-tall
-      curtain STL (the ``*_boundary_3d.stl`` artefact);
-      :func:`extract_outer_boundary_polygon` computes a 2D concave hull
-      of the same open-edge endpoints (mirrored across y=0, clipped to
-      y<=0) — this is the polygon used by the actual trim;
-      :func:`trim_to_shell_boundary` drops UB faces whose any vertex
-      falls outside the polygon (all-vertices test — stricter than a
-      centroid test, no large faces straddling the boundary).
-11. Write the trimmed UB STL, combined (shell + UB) STL, debug PNGs,
-    and a JSON dump of the spec + hints + anchors.
+Outputs (in ``--output-dir``)
+=============================
+
+  <base>_shell.stl              upper shell from run_shell, scaled to
+                                mm (canonical frame).
+  <base>_underbody.stl          parametric UB (floor + wheelhouses),
+                                aligned to shell frame, untrimmed.
+  <base>_underbody_trimmed.stl  UB trimmed to the shell-rim cut polygon
+                                (unless ``--no-trim``).
+  <base>_cut_polygon.stl        cut polygon as a thin vertical wall
+                                (debug; only when trim runs).
+  <base>_wheel_front_left.stl   4 wheels, aligned to shell frame.
+  <base>_wheel_front_right.stl
+  <base>_wheel_rear_left.stl
+  <base>_wheel_rear_right.stl
+  <base>_integrate_meta.json    hints, anchors, spec, face counts.
 
 Coordinate / unit handling
 ==========================
 
 Shell canonical frame (set in :mod:`paramub.shell_extract`):
-    +x = rearward, +y = lateral, +z = up; left half is y <= 0; native
-    units are whatever the input STL was in (typically meters at
-    Hunyuan3D normalized scale, e.g. ~1.2 m long).
+    +x = rearward, +y = lateral, +z = up; native units are whatever the
+    input STL was in (typically meters at Hunyuan3D normalized scale,
+    e.g. ~1.2 m long).
 
 ParamUB underbody frame (set in :mod:`paramub.ub_assem`):
     +x = forward, +y = right, +z = up, mm units, body centered on x=0
@@ -70,84 +48,29 @@ We bridge the two by:
      ParamUB defaults (fillets etc.) are sensible.
   2. After ParamUB generates the underbody in its own frame, we apply
        (x, y, z) -> (-x + dx, y, z)
-     i.e. reflect x (ParamUB +x_forward becomes shell +x_rear) and
-     translate by dx = midpoint_x_shell so the wheels line up. The x
-     reflection inverts triangle winding; we flip face vertex order to
-     keep outward normals consistent.
-  3. Slice at y = 0 to keep the left half.
+     to mirror X and align the wheel midpoints.  The X reflection
+     inverts triangle winding; ``align_to_shell_frame`` flips face
+     vertex order to keep outward normals consistent.
 
-Splitter / diffuser geometry tunables (build_spec keyword args)
-================================================================
+The optional remesh step uses pymeshlab, which needs a newer libstdc++
+than the system one — invoke with the conda env's libs on LD_LIBRARY_PATH:
 
-  y_intermediate              700.0 mm   — intermediate section Y.
-  length_extend_mm            100.0 mm   — splitter front_x / diffuser
-                                            rear_x extended past the
-                                            measured shell edge so the
-                                            boundary trim has material to
-                                            clip against.
-  width_extend_mm             100.0 mm   — outboard section sits at
-                                            ``max(y_intermediate, body_half)
-                                            + width_extend_mm``; floor
-                                            width = 2 * that.
-  splitter_kick_offset_mm      50.0 mm   — splitter kick X = front_axle +
-                                            offset (forward).
-  diffuser_kick_offset_mm      50.0 mm   — diffuser kick X = rear_axle -
-                                            offset (rearward).
-  splitter_front_angle_deg    +30.0      — leading-edge tangent angle
-                                            above +X (up).
-  diffuser_rear_angle_deg      +5.0      — trailing-edge tangent angle
-                                            above -X (up).
-  handle_strength               0.30     — relative Bezier handle length
-                                            (|P0-P1|/|P0-P3|). Capped per
-                                            section to keep the curve
-                                            above ride_h.
+    LD_LIBRARY_PATH=$CONDA_PREFIX/lib python integrate_underbody.py
 
-Outputs (in ``--output-dir``)
-=============================
-
-The UB is split into three independent meshes — the body (floor +
-wheelhouses, sliced + trimmed) and the wheels (rigid bodies, transformed
-only). The combined-body STL is closed at y=0 (both shell and body are
-sliced with ``cap=True``).
-
-  <stem>_combined_body.stl      shell (left half + y=0 cap) + UB body
-                                (left half + y=0 cap, trimmed to shell
-                                silhouette). Approximately closed.
-  <stem>_body.stl               UB body only (floor + wheelhouses),
-                                without the shell. Already trimmed and
-                                capped.
-  <stem>_wheel_front_left.stl   front-left wheel (rigid; transformed
-                                into shell frame, no slice / trim).
-  <stem>_wheel_rear_left.stl    rear-left wheel.
-  (<stem>_wheel_front_right /   only present when half_only=False
-   _rear_right.stl)             (full-car mode).
-
-Debug:
-
-  <stem>_boundary_3d.stl        shell open-edge loops as 10 mm curtains.
-  <stem>_boundary_xy.stl        2D trim polygon as a thin extruded wall.
-  <stem>_boundary.png           top-down debug of the trim polygon.
-  <stem>_combined.png           10-panel debug render of shell + UB.
-  <stem>_underbody_only.png     10-panel debug render of UB alone.
-  <stem>_integrate_meta.json    hints, anchors, spec, face counts,
-                                output file paths.
+Or pass ``--no-remesh`` to skip remesh entirely.
 
 Usage::
 
     python integrate_underbody.py
     python integrate_underbody.py --shell-meta outputs/shell/<name>_meta.json
-    python integrate_underbody.py --no-render            # skip PNGs
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
-import tempfile
 from dataclasses import asdict
-from math import atan2, degrees, tan, radians
 from pathlib import Path
 
 import numpy as np
@@ -191,10 +114,23 @@ def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
     wheelbase = abs(rear_x_shell - front_x_shell)
     midpoint_x_shell = 0.5 * (front_x_shell + rear_x_shell)
 
-    track = 2.0 * abs(np.mean([w["y"] for w in wheels])) * scale
+    # Use mean(|y|) — for full-car wheels are mirrored so mean(y) ≈ 0.
+    track = 2.0 * float(np.mean([abs(w["y"]) for w in wheels])) * scale
     tire_od = 2.0 * np.mean([w["radius"] for w in wheels]) * scale
     tire_width = 2.0 * np.mean([w["axial_half"] for w in wheels]) * scale
     hub_z = np.mean([w["z"] for w in wheels]) * scale
+
+    # Per-axle wheel center y (half-track), in mm. For a full car we
+    # have 4 wheels (2 front, 2 rear); for half-car only the 2 left
+    # wheels are listed. front_wheels = lowest-x pair, rear_wheels =
+    # highest-x pair.
+    n = len(sorted_w)
+    front_wheels = sorted_w[:2] if n >= 4 else [sorted_w[0]]
+    rear_wheels = sorted_w[-2:] if n >= 4 else [sorted_w[-1]]
+    front_wheel_y_mm = float(np.mean(
+        [abs(w["y"]) for w in front_wheels])) * scale
+    rear_wheel_y_mm = float(np.mean(
+        [abs(w["y"]) for w in rear_wheels])) * scale
 
     body_bounds = np.array([verts.min(axis=0), verts.max(axis=0)])
     x_min_body, x_max_body = body_bounds[0, 0], body_bounds[1, 0]
@@ -275,6 +211,8 @@ def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
         wheel_outboard_y_mm=wheel_outboard_y,
         front_x_shell_mm=front_x_shell,
         rear_x_shell_mm=rear_x_shell,
+        front_wheel_y_mm=front_wheel_y_mm,
+        rear_wheel_y_mm=rear_wheel_y_mm,
     )
     print("[hints]")
     for k, v in hints.items():
@@ -284,11 +222,20 @@ def extract_hints(shell_mesh: trimesh.Trimesh, meta: dict,
 
 def measure_shell_anchors(shell_mm: trimesh.Trimesh, ys: list[float],
                           y_band: float = 25.0,
-                          edge_band: float = 50.0) -> dict:
-    """Probe the shell at each y_target in ``ys`` and record the front
-    (smallest x_shell) and rear (largest x_shell) edges plus the lowest
-    Z within ``edge_band`` mm of each extremity. Used as anchors for the
+                          rear_search_mm: float = 200.0,
+                          front_search_mm: float = 200.0) -> dict:
+    """Probe the shell at each y_target in ``ys`` and find the
+    front-bumper-bottom and rear-bumper-bottom anchors used as the
     splitter leading edges and the diffuser trailing edges.
+
+    Algorithm: in the lateral band ``|y - y_target| < y_band``, search
+    the last ``rear_search_mm`` of x (resp. first ``front_search_mm``)
+    for the vertex with the lowest z. That vertex's (x, z) is the
+    anchor — i.e. the physical bumper-bottom *edge*. Reporting just
+    ``min(z)`` in a narrow slab next to ``x_max`` is wrong on a body
+    with a rounded bumper (the rear-most x sits at the bumper *top*
+    where it rounds into the trunk, ~50–150 mm above the bumper
+    bottom).
 
     The shell is symmetric in y, so we accept vertices at either +y or -y.
 
@@ -306,21 +253,27 @@ def measure_shell_anchors(shell_mm: trimesh.Trimesh, ys: list[float],
                 f"no shell vertices within y_band={y_band} mm of Y={y}")
         x_min = float(band[:, 0].min())
         x_max = float(band[:, 0].max())
-        front = band[band[:, 0] < x_min + edge_band]
-        rear = band[band[:, 0] > x_max - edge_band]
+        front = band[band[:, 0] < x_min + front_search_mm]
+        rear = band[band[:, 0] > x_max - rear_search_mm]
+        i_fbot = int(np.argmin(front[:, 2]))
+        i_rbot = int(np.argmin(rear[:, 2]))
         out[y] = {
             "y_target": float(y),
-            "front_x_shell": x_min,
-            "front_z_shell": float(front[:, 2].min()),
-            "rear_x_shell": x_max,
-            "rear_z_shell": float(rear[:, 2].min()),
+            "front_x_shell": float(front[i_fbot, 0]),
+            "front_z_shell": float(front[i_fbot, 2]),
+            "rear_x_shell": float(rear[i_rbot, 0]),
+            "rear_z_shell": float(rear[i_rbot, 2]),
+            "front_x_extent": x_min,
+            "rear_x_extent": x_max,
         }
         a = out[y]
         print(f"[anchor] Y={y:>5.0f}  "
               f"front (x,z)=({a['front_x_shell']:>7.1f}, "
-              f"{a['front_z_shell']:>6.1f})  "
+              f"{a['front_z_shell']:>6.1f}) "
+              f"[bumper-tip x={x_min:.1f}]  "
               f"rear (x,z)=({a['rear_x_shell']:>7.1f}, "
-              f"{a['rear_z_shell']:>6.1f})")
+              f"{a['rear_z_shell']:>6.1f}) "
+              f"[bumper-tip x={x_max:.1f}]")
     return out
 
 
@@ -370,6 +323,8 @@ def build_spec(hints: dict, anchors: dict,
                 lat_overrides: dict | None = None,
                 *,
                 y_intermediate: float = 700.0,
+                y_intermediate_splitter: float | None = None,
+                y_intermediate_diffuser: float | None = None,
                 length_extend_mm: float = 0.0,
                 width_extend_mm: float = 100.0,
                 splitter_kick_offset_mm: float = 50.0,
@@ -434,10 +389,20 @@ def build_spec(hints: dict, anchors: dict,
     def shell_x_to_paramub_x(x_shell: float) -> float:
         return midpoint_x - x_shell
 
+    if y_intermediate_splitter is None:
+        y_intermediate_splitter = y_intermediate
+    if y_intermediate_diffuser is None:
+        y_intermediate_diffuser = y_intermediate
+
     body_half = hints["floor_width_mm"] / 2.0
-    y_outboard = max(y_intermediate, body_half) + width_extend_mm
+    # Single y_outboard for both lofts. floor_width is symmetric and
+    # must accommodate the maximum of the two intermediate Y values.
+    y_outboard = max(y_intermediate_splitter,
+                      y_intermediate_diffuser,
+                      body_half) + width_extend_mm
     floor_width = 2.0 * y_outboard
-    print(f"[spec] y_intermediate={y_intermediate:.0f}  "
+    print(f"[spec] y_intermediate_splitter={y_intermediate_splitter:.0f}  "
+          f"y_intermediate_diffuser={y_intermediate_diffuser:.0f}  "
           f"body_half={body_half:.0f}  width_extend={width_extend_mm:.0f}  "
           f"→  y_outboard={y_outboard:.0f}  floor_width={floor_width:.0f}")
 
@@ -504,13 +469,13 @@ def build_spec(hints: dict, anchors: dict,
 
     splitter_sections = [
         splitter_at(0.0, 0.0),
-        splitter_at(y_intermediate, y_intermediate),
-        splitter_at(y_intermediate, y_outboard),   # outboard = copy of intermediate
+        splitter_at(y_intermediate_splitter, y_intermediate_splitter),
+        splitter_at(y_intermediate_splitter, y_outboard),   # outboard = copy of intermediate
     ]
     diffuser_sections = [
         diffuser_at(0.0, 0.0),
-        diffuser_at(y_intermediate, y_intermediate),
-        diffuser_at(y_intermediate, y_outboard),
+        diffuser_at(y_intermediate_diffuser, y_intermediate_diffuser),
+        diffuser_at(y_intermediate_diffuser, y_outboard),
     ]
 
     spec = UnderbodySpec(
@@ -538,19 +503,8 @@ def build_spec(hints: dict, anchors: dict,
 
 
 # ---------------------------------------------------------------------------
-# Generate -> STL -> trimesh; transform to shell frame; keep left half
+# CadQuery -> trimesh; align to shell frame; densify
 # ---------------------------------------------------------------------------
-
-def cq_to_trimesh_via_stl(asy, stl_tmp: Path) -> trimesh.Trimesh:
-    """Export a cadquery Assembly to STL and load as trimesh."""
-    import cadquery as cq
-    from cadquery import exporters
-    compound = asy.toCompound()
-    exporters.export(compound, str(stl_tmp),
-                     exporters.ExportTypes.STL,
-                     tolerance=0.1, angularTolerance=0.1)
-    return trimesh.load(str(stl_tmp), force="mesh", process=False)
-
 
 def align_to_shell_frame(mesh: trimesh.Trimesh,
                           midpoint_x_shell: float) -> trimesh.Trimesh:
@@ -587,155 +541,6 @@ def subdivide_to_edge(mesh: trimesh.Trimesh, max_edge: float) -> trimesh.Trimesh
     return out
 
 
-def keep_left_half(mesh: trimesh.Trimesh, cap: bool = False) -> trimesh.Trimesh:
-    """Slice at y = 0 and keep y <= 0. If ``cap`` is True, the cut is
-    triangulated so the resulting mesh is approximately closed at the
-    y=0 plane (useful for the combined shell + UB body output)."""
-    cut = trimesh.intersections.slice_mesh_plane(
-        mesh,
-        plane_normal=np.array([0.0, -1.0, 0.0]),
-        plane_origin=np.array([0.0, 0.0, 0.0]),
-        cap=cap,
-    )
-    cut.face_normals = None
-    return cut
-
-
-def cap_open_boundary_at_y0(mesh: trimesh.Trimesh,
-                              y_tol: float = 1e-3,
-                              hull_ratio: float = 0.05) -> trimesh.Trimesh:
-    """Triangulate a flat cap on the y=0 plane.
-
-    Expects the input mesh to have a clean planar boundary at y=0 — i.e.
-    the open boundary edges along the symmetry plane have BOTH endpoints
-    exactly (within ``y_tol``) at y=0. ``run_shell.py``'s
-    ``clean_y0_boundary`` produces such a mesh.
-
-    Strategy:
-      0. Process the input mesh (merge coincident vertices). Without
-         this, an unprocessed STL with duplicate verts gives many tiny
-         "components" instead of the one main silhouette loop.
-      1. Identify open boundary edges whose both endpoints satisfy
-         ``|y| < y_tol``.
-      2. Group those edges into connected components.
-      3. For each component, compute the concave hull of its xz points
-         (gets an ORDERED boundary polygon even when the underlying
-         open-edge graph has junctions or branches that would defeat a
-         naïve walk).
-      4. Triangulate the hull polygon via mapbox_earcut, creating new
-         3D cap vertices at y=0.
-      5. Append cap vertices + faces to the mesh.
-
-    Caps multiple disjoint loops independently. The cap polygon uses
-    its own new vertices (not the mesh's existing y=0 vertices), so
-    junctions in the original open-edge graph don't matter — only the
-    perimeter of the component's xz footprint does.
-    """
-    import mapbox_earcut
-    from collections import defaultdict
-    from shapely.geometry import MultiPoint
-
-    # Step 0: dedupe vertices so connected-components logic doesn't see
-    # the main silhouette as many tiny disjoint fragments.
-    mesh = trimesh.Trimesh(
-        vertices=np.asarray(mesh.vertices, dtype=np.float64),
-        faces=np.asarray(mesh.faces, dtype=np.int64),
-        process=True)
-
-    verts = np.asarray(mesh.vertices, dtype=np.float64)
-    faces = np.asarray(mesh.faces, dtype=np.int64)
-    at_y0 = np.abs(verts[:, 1]) < y_tol
-
-    sh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-    edges = sh.edges_sorted
-    unique, counts = np.unique(edges, axis=0, return_counts=True)
-    open_pairs = unique[counts == 1]
-    if len(open_pairs) == 0:
-        print("[cap-y0] no open boundary edges; nothing to cap.")
-        return mesh
-
-    on_y0 = at_y0[open_pairs[:, 0]] & at_y0[open_pairs[:, 1]]
-    cut_edges = open_pairs[on_y0]
-    if len(cut_edges) < 3:
-        print(f"[cap-y0] only {len(cut_edges)} open edges on y=0; no cap.")
-        return mesh
-
-    adj: dict[int, set[int]] = defaultdict(set)
-    for i, j in cut_edges:
-        adj[int(i)].add(int(j))
-        adj[int(j)].add(int(i))
-
-    visited: set[int] = set()
-    components: list[list[int]] = []
-    for start in list(adj.keys()):
-        if start in visited:
-            continue
-        comp: list[int] = []
-        stack = [start]
-        while stack:
-            n = stack.pop()
-            if n in visited:
-                continue
-            visited.add(n)
-            comp.append(n)
-            stack.extend(adj[n] - visited)
-        if len(comp) >= 3:
-            components.append(comp)
-
-    new_verts_blocks: list[np.ndarray] = []
-    new_faces = list(faces)
-    n_added = 0
-    capped_loops = 0
-    skipped_loops = 0
-    for comp in components:
-        pts_xz = verts[comp][:, [0, 2]]
-        try:
-            hull = MultiPoint(pts_xz).concave_hull(ratio=hull_ratio)
-        except AttributeError:
-            hull = MultiPoint(pts_xz).convex_hull
-        if hull.is_empty or hull.geom_type != "Polygon":
-            skipped_loops += 1
-            continue
-        coords = np.asarray(hull.exterior.coords, dtype=np.float64)
-        if len(coords) >= 2 and np.allclose(coords[0], coords[-1]):
-            coords = coords[:-1]
-        if len(coords) < 3:
-            skipped_loops += 1
-            continue
-        n = len(coords)
-        new_v = np.column_stack(
-            [coords[:, 0], np.zeros(n), coords[:, 1]])
-        offset = len(verts) + sum(len(v) for v in new_verts_blocks)
-        rings = np.asarray([n], dtype=np.uint32)
-        try:
-            tri = mapbox_earcut.triangulate_float64(coords, rings)
-        except Exception:
-            skipped_loops += 1
-            continue
-        if len(tri) == 0:
-            skipped_loops += 1
-            continue
-        new_verts_blocks.append(new_v)
-        for t in range(0, len(tri), 3):
-            new_faces.append([offset + int(tri[t]),
-                              offset + int(tri[t + 1]),
-                              offset + int(tri[t + 2])])
-            n_added += 1
-        capped_loops += 1
-
-    all_verts = (np.vstack([verts, *new_verts_blocks])
-                 if new_verts_blocks else verts)
-    print(f"[cap-y0] verts at y=0: {int(at_y0.sum()):,}  "
-          f"open-on-y0 edges: {len(cut_edges):,}  "
-          f"components: {len(components)}  "
-          f"loops capped: {capped_loops}, skipped: {skipped_loops}  "
-          f"cap triangles added: {n_added}")
-    return trimesh.Trimesh(
-        vertices=all_verts,
-        faces=np.array(new_faces, dtype=np.int64),
-        process=False)
-
-
 def cq_obj_to_trimesh_via_stl(cq_obj, stl_tmp: Path,
                                tolerance: float = 0.1,
                                angular_tolerance: float = 0.1
@@ -756,497 +561,224 @@ def cq_obj_to_trimesh_via_stl(cq_obj, stl_tmp: Path,
 
 
 # ---------------------------------------------------------------------------
-# Perimeter trim: drop underbody faces whose xy is far from the shell xy
+# Shell rim → 2-D cut polygon (silhouette − shrink) for trimming the UB
 # ---------------------------------------------------------------------------
 
-def extract_shell_boundary_loops_3d(
-        shell_mm: trimesh.Trimesh, min_points: int = 10,
-        ignore_y_eps: float = 5.0) -> list[np.ndarray]:
-    """Connected loops of open boundary edges of the shell mesh, as 3D
-    polylines (Nx3 arrays). One loop per element of the returned list.
+def build_shell_cut_polygon(shell_mm: trimesh.Trimesh,
+                             shrink_mm: float = 50.0,
+                             simplify_mm: float = 10.0,
+                             concave_ratio: float = 0.05):
+    """Z-project the upper-shell's longest open-boundary loop onto the
+    XY plane, build a concave-hull polygon, shrink inward by
+    ``shrink_mm``, then smooth.
 
-    These trace the shell's actual edges in 3D — outer body silhouette,
-    wheelhouse openings, etc. — and go UP around features instead of
-    being flattened to z=0 like the XY hull.
+    The shell mesh must already be in mm (caller-side scaling).
 
-    Loops that lie entirely on the y=0 symmetry plane (the artificial
-    cut from the half-shell) are filtered out.
+    Returns a shapely Polygon (in mm) or ``None`` if the shrink left
+    nothing usable.
     """
+    import shapely
+    from shapely.geometry import MultiPoint, Polygon
+    from paramub.shell_recut import find_open_boundary_components
+
+    # final_path was loaded with process=False so its boundary graph is
+    # noise (every face has its own vertices). Re-process for dedup.
     sh = trimesh.Trimesh(
-        vertices=shell_mm.vertices.copy(),
-        faces=shell_mm.faces.copy(),
+        vertices=np.asarray(shell_mm.vertices),
+        faces=np.asarray(shell_mm.faces),
         process=True)
-    outline = sh.outline()
-    loops: list[np.ndarray] = []
-    if outline is None or not hasattr(outline, "entities"):
-        return loops
-    for entity in outline.entities:
-        try:
-            pts = entity.discrete(outline.vertices)
-        except Exception:
-            continue
-        if pts is None or len(pts) < min_points:
-            continue
-        pts = np.asarray(pts, dtype=np.float64)
-        if (np.abs(pts[:, 1]) < ignore_y_eps).all():
-            continue       # artificial y=0 cut
-        loops.append(pts)
-    return loops
+    boundary, components = find_open_boundary_components(sh)
+    if not components:
+        return None
+    rim_idx = components[0][0]
+    rim_xy = np.asarray(sh.vertices)[rim_idx, :2]
+    print(f"[cut-poly] rim {len(rim_idx):,} verts -> "
+          f"XY range x∈[{rim_xy[:,0].min():.0f},{rim_xy[:,0].max():.0f}] "
+          f"y∈[{rim_xy[:,1].min():.0f},{rim_xy[:,1].max():.0f}]")
+
+    mp = MultiPoint(rim_xy)
+    hull = shapely.concave_hull(mp, ratio=concave_ratio)
+    if not isinstance(hull, Polygon) or hull.is_empty:
+        print(f"[cut-poly] concave hull came back empty / not a polygon: "
+              f"{hull.geom_type}")
+        return None
+    print(f"[cut-poly] concave hull (ratio={concave_ratio}): "
+          f"area={hull.area:.0f} mm^2, "
+          f"exterior length={hull.exterior.length:.0f} mm")
+
+    shrunk = hull.buffer(-shrink_mm)
+    if shrunk.is_empty:
+        print(f"[cut-poly] shrink({-shrink_mm}) emptied the polygon")
+        return None
+    if shrunk.geom_type == "MultiPolygon":
+        # Keep the largest piece — a thin neck might split into chunks
+        shrunk = max(shrunk.geoms, key=lambda g: g.area)
+    print(f"[cut-poly] shrunk by {shrink_mm} mm -> area={shrunk.area:.0f} mm^2, "
+          f"exterior length={shrunk.exterior.length:.0f} mm")
+
+    smoothed = shrunk.simplify(simplify_mm, preserve_topology=True)
+    if smoothed.is_empty:
+        smoothed = shrunk
+    print(f"[cut-poly] simplify({simplify_mm}) -> "
+          f"exterior coords {len(shrunk.exterior.coords)} → "
+          f"{len(smoothed.exterior.coords)}")
+    return smoothed
 
 
-def export_loops_as_curtain_stl(loops: list[np.ndarray], out_path: Path,
-                                 height: float = 10.0) -> None:
-    """Each 3D loop becomes a thin vertical curtain (the loop polyline
-    extruded DOWN by ``height`` mm in Z). The result is a single STL of
-    all loops, visible in 3D viewers alongside the shell + underbody so
-    the trim boundary can be inspected exactly where it lives in 3D —
-    including up around the wheel arches."""
-    all_v = []
-    all_f = []
-    off = 0
-    for loop in loops:
-        if len(loop) < 3:
-            continue
-        n = len(loop)
-        top = loop.copy()
-        bot = loop.copy()
-        bot[:, 2] -= height
-        verts = np.vstack([top, bot])
-        faces = []
-        for i in range(n - 1):
-            faces.append([i, i + 1, i + n + 1])
-            faces.append([i, i + n + 1, i + n])
-        # Close the loop if its first/last vertex differ noticeably
-        if not np.allclose(loop[0], loop[-1], atol=1.0):
-            faces.append([n - 1, 0, n])
-            faces.append([n - 1, n, 2 * n - 1])
-        all_v.append(verts)
-        all_f.append(np.asarray(faces, dtype=np.int64) + off)
-        off += 2 * n
-    if not all_v:
-        print(f"[boundary 3D] no loops to export to {out_path}")
-        return
-    mesh = trimesh.Trimesh(
-        vertices=np.vstack(all_v),
-        faces=np.vstack(all_f),
-        process=False)
-    mesh.export(str(out_path), file_type="stl")
-    print(f"[boundary 3D] wrote {out_path}  "
-          f"({len(loops)} loops, {len(mesh.faces)} triangles, "
-          f"curtain height={height:.0f}mm)")
+def remesh_underbody_isotropic(mesh: trimesh.Trimesh,
+                                 target_edge_mm: float,
+                                 iterations: int = 6,
+                                 scratch_dir: Path | None = None
+                                 ) -> trimesh.Trimesh:
+    """Re-mesh ``mesh`` with PyMeshLab's isotropic-explicit remesher to a
+    uniform ``target_edge_mm`` edge length. Returns a new trimesh.
 
-
-def extract_outer_boundary_polygon(shell_mm: trimesh.Trimesh,
-                                     ignore_y_eps: float = 5.0,
-                                     concave_ratio: float = 0.02):
-    """Build a closed polygon (in xy) that traces the outer lower
-    silhouette of the shell. We:
-
-    1. Process the shell to merge duplicate vertices (CadQuery STL output
-       has no vertex sharing).
-    2. Collect every OPEN boundary-edge endpoint (each edge appearing in
-       exactly one face). These lie on the shell's actual boundary loops
-       (rocker bottoms, bumper bottoms, wheelhouse openings, etc.).
-    3. Drop endpoints on the y=0 symmetry plane (artificial cut, not a
-       body silhouette).
-    4. Mirror the points across y=0 so the resulting hull is symmetric
-       and we get a single closed contour around the WHOLE car (instead
-       of a half-car with a flat side on y=0).
-    5. Compute a concave hull (alpha shape) and clip it back to y ≤ 0.
-
-    Returns a shapely Polygon in xy, in mm.
+    Bounded memory + fast — implemented in C++. Used as a last step to
+    bring the parametric underbody's mesh density up to the upper
+    shell's, so downstream booleans / projections see comparable
+    resolution on both meshes.
     """
-    from shapely.geometry import MultiPoint, Polygon, box
-
-    sh = trimesh.Trimesh(vertices=shell_mm.vertices.copy(),
-                          faces=shell_mm.faces.copy(),
-                          process=True)
-    edges = sh.edges_sorted
-    unique, counts = np.unique(edges, axis=0, return_counts=True)
-    boundary_pairs = unique[counts == 1]
-    v = sh.vertices
-    a = v[boundary_pairs[:, 0]]
-    b = v[boundary_pairs[:, 1]]
-    keep = ~((np.abs(a[:, 1]) < ignore_y_eps) & (np.abs(b[:, 1]) < ignore_y_eps))
-    a = a[keep]; b = b[keep]
-    pts_xy = np.vstack([a[:, :2], b[:, :2]])
-    print(f"[boundary] {len(a):,} open boundary edges → "
-          f"{len(pts_xy):,} xy points (y=0 cut filtered)")
-
-    # Mirror so the concave hull spans both sides.
-    mirrored = np.column_stack([pts_xy[:, 0], -pts_xy[:, 1]])
-    all_pts = np.vstack([pts_xy, mirrored])
-
-    mp = MultiPoint(all_pts)
-    try:
-        hull = mp.concave_hull(ratio=concave_ratio)
-    except AttributeError:
-        # shapely < 2.0
-        hull = mp.convex_hull
-
-    if isinstance(hull, Polygon) and not hull.is_empty:
-        # Clip to y <= 0 (the half we care about).
-        b = sh.bounds
-        bb = box(b[0, 0] - 100, b[0, 1] - 100, b[1, 0] + 100, 0.0)
-        clipped = hull.intersection(bb)
-        if clipped.is_empty:
-            clipped = hull
-        # If the intersection produced a MultiPolygon, pick the largest.
-        if clipped.geom_type == "MultiPolygon":
-            clipped = max(clipped.geoms, key=lambda g: g.area)
-        print(f"[boundary] hull area={hull.area:.0f} mm²  "
-              f"clipped (y≤0) area={clipped.area:.0f} mm²")
-        return clipped
-    print("[boundary] hull came back empty; falling back to convex hull")
-    return mp.convex_hull
+    import pymeshlab
+    scratch_dir = scratch_dir or Path("/tmp")
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    src = scratch_dir / "remesh_in.stl"
+    dst = scratch_dir / "remesh_out.stl"
+    mesh.export(str(src), file_type="stl")
+    ms = pymeshlab.MeshSet()
+    ms.load_new_mesh(str(src))
+    f0 = ms.current_mesh().face_number()
+    ms.meshing_isotropic_explicit_remeshing(
+        targetlen=pymeshlab.AbsoluteValue(target_edge_mm),
+        iterations=iterations,
+        adaptive=False,
+        checksurfdist=False,
+    )
+    f1 = ms.current_mesh().face_number()
+    ms.save_current_mesh(str(dst))
+    out = trimesh.load(str(dst), force="mesh", process=False)
+    print(f"[remesh] pymeshlab isotropic (targetlen={target_edge_mm:.2f} mm, "
+          f"iters={iterations}): {f0:,} -> {f1:,} faces")
+    return out
 
 
-def _loop_to_polygon(loop_3d: np.ndarray, min_area: float = 100.0):
-    """Project a 3D polyline to XY and try to build a shapely Polygon.
-    trimesh.outline() returns open chains (first/last point not matched);
-    we close the chain manually and use ``buffer(0)`` to clean up small
-    self-intersections."""
-    from shapely.geometry import Polygon
+def cut_underbody_cq_with_polygon(underbody_cq, polygon,
+                                    midpoint_x_shell: float,
+                                    z_pad: float = 100.0):
+    """BREP-level cut of the CadQuery underbody Compound by the vertical
+    extrusion of ``polygon`` (a shapely Polygon in SHELL-frame mm).
 
-    xy = loop_3d[:, :2]
-    if len(xy) < 4:
-        return None
-    if not np.allclose(xy[0], xy[-1]):
-        xy = np.vstack([xy, xy[:1]])
-    try:
-        p = Polygon(xy)
-    except Exception:
-        return None
-    if not p.is_valid:
-        p = p.buffer(0)
-        if p.is_empty:
-            return None
-        if p.geom_type == "MultiPolygon":
-            p = max(p.geoms, key=lambda g: g.area)
-        if p.geom_type != "Polygon":
-            return None
-    if p.area < min_area:
-        return None
-    return p
+    Each face of ``underbody_cq`` is intersected with a prism whose XY
+    cross-section is ``polygon`` (transformed to ParamUB frame: X is
+    reflected about ``midpoint_x_shell``). The intersection preserves
+    analytical curves at the cut, so subsequent STL tessellation gives
+    clean triangulated edges along the polygon's perimeter rather than
+    the staircased boundary you get from filtering pre-tessellated
+    triangles in 2-D.
 
-
-def boundary_polygon_with_holes(shell_mm: trimesh.Trimesh,
-                                 loops3d: list[np.ndarray] | None = None,
-                                 ignore_y_eps: float = 5.0,
-                                 min_hole_area: float = 5000.0):
-    """Build a 2D polygon WITH HOLES from the shell's 3D open-edge loops.
-
-    Largest projected loop = exterior body silhouette.
-    Smaller loops contained within the exterior = holes (wheelhouse
-    openings, etc.).
-
-    Returns a shapely Polygon (potentially with holes), clipped to y ≤ 0
-    to match the left-half underbody. None if no usable loops.
+    Returns a CadQuery Compound of trimmed faces (or an empty compound
+    if every face fell outside the prism).
     """
-    from shapely.geometry import Polygon, box
-    from shapely import affinity
-    from shapely.ops import unary_union
+    import cadquery as cq
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Common
 
-    if loops3d is None:
-        loops3d = extract_shell_boundary_loops_3d(
-            shell_mm, ignore_y_eps=ignore_y_eps)
+    # Polygon coords (shell frame, mm); drop closing duplicate if present
+    coords_shell = list(polygon.exterior.coords)
+    if len(coords_shell) >= 2 and coords_shell[0] == coords_shell[-1]:
+        coords_shell = coords_shell[:-1]
+    # Transform: x_paramub = midpoint - x_shell  (mirror across midpoint)
+    # The mirror reverses winding so polyline order goes CW -> CCW; CQ
+    # autodetects orientation when extruding closed wires.
+    coords_pub = [(midpoint_x_shell - x, y) for x, y in coords_shell]
 
-    polys = []
-    for loop in loops3d:
-        p = _loop_to_polygon(loop)
-        if p is not None:
-            polys.append(p)
-    print(f"[boundary] {len(polys)}/{len(loops3d)} loops → valid polygons")
-    if not polys:
-        return None
+    bbox = underbody_cq.BoundingBox()
+    z_min = bbox.zmin - z_pad
+    z_top = bbox.zmax + z_pad
+    height = z_top - z_min
+    print(f"[brep-cut] polygon {len(coords_pub)} corners; "
+          f"prism z=[{z_min:.0f}, {z_top:.0f}]  height={height:.0f} mm")
 
-    polys.sort(key=lambda p: p.area, reverse=True)
-    outer_half = polys[0]
-    # Mirror exterior across y=0 so the boundary covers both halves;
-    # we clip back to y≤0 at the end.
-    outer_mirror = affinity.scale(outer_half, xfact=1, yfact=-1, origin=(0, 0))
-    outer_full = unary_union([outer_half, outer_mirror]).buffer(0)
-    if outer_full.geom_type != "Polygon":
-        # MultiPolygon — pick the largest piece
-        outer_full = max(outer_full.geoms, key=lambda g: g.area)
+    prism_wp = (cq.Workplane("XY", origin=(0, 0, z_min))
+                .polyline(coords_pub)
+                .close()
+                .extrude(height))
+    prism_solid = prism_wp.val()
 
-    holes = []
-    for p in polys[1:]:
-        if p.area < min_hole_area:
+    in_faces = list(underbody_cq.Faces())
+    trimmed: list = []
+    for face in in_faces:
+        op = BRepAlgoAPI_Common(face.wrapped, prism_solid.wrapped)
+        op.Build()
+        if not op.IsDone():
             continue
-        if not outer_full.contains(p):
+        res = op.Shape()
+        if res.IsNull():
             continue
-        holes.append(p)
-        # Mirror the hole too so the full-car polygon has both wheel arches
-        p_mirror = affinity.scale(p, xfact=1, yfact=-1, origin=(0, 0))
-        if outer_full.contains(p_mirror):
-            holes.append(p_mirror)
+        trimmed.append(cq.Shape(res))
 
-    exterior_coords = list(outer_full.exterior.coords)
-    hole_coords = [list(h.exterior.coords) for h in holes]
-    poly_with_holes = Polygon(exterior_coords, hole_coords)
-
-    # Clip to y ≤ 0
-    b = poly_with_holes.bounds
-    clip = box(b[0] - 100, b[1] - 100, b[2] + 100, 0.0)
-    clipped = poly_with_holes.intersection(clip)
-    if clipped.is_empty:
-        clipped = poly_with_holes
-    if clipped.geom_type == "MultiPolygon":
-        clipped = max(clipped.geoms, key=lambda g: g.area)
-
-    n_holes = len(clipped.interiors) if hasattr(clipped, "interiors") else 0
-    print(f"[boundary] polygon-with-holes: outer area={outer_full.area:.0f} "
-          f"mm², {len(holes)} holes (post-mirror), "
-          f"clipped area={clipped.area:.0f} mm² ({n_holes} holes after y≤0 clip)")
-    return clipped
-
-
-def trim_to_shell_boundary(underbody: trimesh.Trimesh,
-                            boundary_polygon,
-                            buffer_mm: float = 5.0) -> trimesh.Trimesh:
-    """Trim UB faces against the shell's outer boundary polygon (xy).
-
-    Uses an ALL-VERTICES test: a face is kept only when all three of its
-    vertices' (x, y) lie inside the polygon. This is stricter than a
-    centroid test — it prevents large faces from straddling the boundary
-    with the centroid inside but corners poking past. Combine with a
-    fine subdivision (small ``max_edge``) for a sharp trim.
-
-    The polygon is buffered OUTWARD by ``buffer_mm`` (default 5 mm)
-    before the test, so:
-        - splitter / diffuser endpoints that sit exactly on the body
-          silhouette are not dropped as "on the boundary";
-        - the y=0 cap vertices (which lie on the polygon's y=0 edge)
-          survive the test.
-    """
-    try:
-        from shapely import contains_xy
-    except ImportError:
-        from shapely.vectorized import contains as contains_xy
-    if not hasattr(boundary_polygon, "geom_type"):
-        keep = np.ones(len(underbody.faces), dtype=bool)
+    if trimmed:
+        out = cq.Compound.makeCompound(trimmed)
     else:
-        test_polygon = (boundary_polygon.buffer(buffer_mm)
-                         if buffer_mm > 0 else boundary_polygon)
-        verts_xy = underbody.vertices[:, :2]
-        vert_inside = contains_xy(
-            test_polygon, verts_xy[:, 0], verts_xy[:, 1])
-        keep = vert_inside[underbody.faces].all(axis=1)
+        out = cq.Compound.makeCompound([])
+    out_faces = list(out.Faces())
+    print(f"[brep-cut] {len(in_faces)} input faces -> "
+          f"{len(out_faces)} trimmed faces in compound")
+    return out
+
+
+def trim_underbody_xy(underbody: trimesh.Trimesh, polygon) -> trimesh.Trimesh:
+    """Keep UB faces whose three vertices' XY all lie inside ``polygon``.
+
+    Equivalent to extruding ``polygon`` vertically through the UB and
+    cutting — every face that survives the test is geometrically
+    inside the prism for all Z. Strict (all-three-verts-inside) so no
+    triangle straddles the boundary."""
+    from shapely import contains_xy
+    verts_xy = np.asarray(underbody.vertices[:, :2])
+    inside = contains_xy(polygon, verts_xy[:, 0], verts_xy[:, 1])
+    keep = inside[underbody.faces].all(axis=1)
     keep_idx = np.flatnonzero(keep)
-    print(f"[trim] boundary-polygon (all-verts inside) -> keep "
-          f"{int(keep.sum()):,}/{len(keep):,} faces "
-          f"(dropped {int((~keep).sum()):,})")
-    if len(keep_idx) == 0:
-        # nothing kept — return an empty trimesh to avoid crashing the rest
+    print(f"[trim] inside-polygon test: keep {keep_idx.size:,} / "
+          f"{len(underbody.faces):,} faces "
+          f"(dropped {len(underbody.faces) - keep_idx.size:,})")
+    if keep_idx.size == 0:
         return trimesh.Trimesh(vertices=underbody.vertices[:0],
                                 faces=np.zeros((0, 3), dtype=np.int64),
                                 process=False)
-    kept = underbody.submesh([keep_idx], append=True)
-    if isinstance(kept, list):
-        kept = kept[0]
-    return kept
+    out = underbody.submesh([keep_idx], append=True)
+    if isinstance(out, list):
+        out = out[0]
+    return out
 
 
-def export_boundary_polygon_stl(polygon, out_path: Path,
+def export_polygon_as_wall_stl(polygon, out_path: Path,
                                  z_base: float = 0.0,
-                                 z_height: float = 5.0) -> None:
-    """Save the 2D boundary polygon as a thin extruded WALL STL so it
-    can be inspected in 3D viewers next to the shell + underbody.
-
-    The wall sits between z=z_base and z=z_base + z_height (no top or
-    bottom caps — those would require a 2D triangulation engine that
-    isn't always available in this env). The wall traces the polygon's
-    exterior, which is what matters for visual inspection of the trim
-    boundary."""
+                                 z_top: float = 5.0) -> None:
+    """Render the cut polygon as a thin vertical wall STL for debug
+    viewing alongside the body."""
     if not hasattr(polygon, "exterior"):
-        print(f"[boundary STL] polygon has no exterior; skipping {out_path}")
         return
-    coords = np.array(polygon.exterior.coords)
+    coords = np.asarray(polygon.exterior.coords)
     if len(coords) >= 2 and np.allclose(coords[0], coords[-1]):
         coords = coords[:-1]
     n = len(coords)
     if n < 3:
-        print(f"[boundary STL] polygon has <3 unique points; skipping")
         return
-    bottom = np.column_stack(
-        [coords[:, 0], coords[:, 1], np.full(n, z_base)])
-    top = np.column_stack(
-        [coords[:, 0], coords[:, 1], np.full(n, z_base + z_height)])
-    verts = np.vstack([bottom, top])
+    bot = np.column_stack([coords[:, 0], coords[:, 1],
+                            np.full(n, z_base, dtype=np.float64)])
+    top = np.column_stack([coords[:, 0], coords[:, 1],
+                            np.full(n, z_top, dtype=np.float64)])
+    verts = np.vstack([bot, top])
     faces = []
     for i in range(n):
         j = (i + 1) % n
-        # Two triangles per edge.
         faces.append([i, j, j + n])
         faces.append([i, j + n, i + n])
-    mesh = trimesh.Trimesh(
-        vertices=verts, faces=np.array(faces, dtype=np.int64), process=False)
+    mesh = trimesh.Trimesh(vertices=verts,
+                            faces=np.array(faces, dtype=np.int64),
+                            process=False)
     mesh.export(str(out_path), file_type="stl")
-    print(f"[boundary STL] wrote {out_path}  "
-          f"({len(coords)} polygon points; wall at "
-          f"z=[{z_base:.1f}, {z_base + z_height:.1f}])")
-
-
-def trim_to_shell_footprint(underbody: trimesh.Trimesh,
-                             shell_mm: trimesh.Trimesh) -> trimesh.Trimesh:
-    """Trim underbody faces whose xy lies outside the shell's xy
-    silhouette. For each face centroid, cast a vertical ray upward
-    starting just below the shell's lowest z — if the ray hits the shell
-    anywhere above, the face is under the silhouette and is kept; if not,
-    the face is poking past the body's outline (typically the corners of
-    the floor rectangle past the rounded bumper) and is dropped."""
-    centroids = underbody.vertices[underbody.faces].mean(axis=1)
-    n = len(centroids)
-    z_lo = float(shell_mm.bounds[0, 2]) - 10.0
-    origins = np.column_stack([centroids[:, 0], centroids[:, 1],
-                                np.full(n, z_lo)])
-    directions = np.tile(np.array([0.0, 0.0, 1.0]), (n, 1))
-    inter = trimesh.ray.ray_pyembree.RayMeshIntersector(shell_mm) \
-        if trimesh.ray.has_embree else \
-        trimesh.ray.ray_triangle.RayMeshIntersector(shell_mm)
-    keep = inter.intersects_any(ray_origins=origins, ray_directions=directions)
-    print(f"[trim] under_shell  -> keep {int(keep.sum()):,}/{n:,} faces "
-          f"(dropped {int((~keep).sum()):,} outside the xy silhouette)")
-    kept = underbody.submesh([np.flatnonzero(keep)], append=True)
-    if isinstance(kept, list):
-        kept = kept[0]
-    return kept
-
-
-# ---------------------------------------------------------------------------
-# Render (reuses paramub.shell_render via subprocess)
-# ---------------------------------------------------------------------------
-
-RENDER_FACE_BUDGET = 30_000
-
-
-def _decimate_subproc(src_stl: Path, dst_stl: Path, target_faces: int) -> None:
-    """PyVista decimate in a subprocess (PyVista / matplotlib are happier
-    not loaded in the same interpreter as cadquery).
-
-    Uses decimate_pro for high-ratio reductions (>= 0.9) since
-    vtkDecimatePro handles extreme ratios more robustly than vtkDecimate.
-    """
-    code = """
-import sys
-import pyvista as pv
-src, dst, target = sys.argv[1], sys.argv[2], int(sys.argv[3])
-mesh = pv.read(src)
-n = mesh.n_cells
-if n <= target:
-    mesh.save(dst, binary=True)
-else:
-    ratio = 1.0 - target / float(n)
-    if ratio >= 0.9:
-        try:
-            out = mesh.decimate_pro(ratio, preserve_topology=False)
-        except Exception:
-            out = mesh.decimate(min(ratio, 0.95))
-    else:
-        out = mesh.decimate(ratio)
-    out.save(dst, binary=True)
-"""
-    cmd = [sys.executable, "-c", code, str(src_stl), str(dst_stl), str(target_faces)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"decimate failed: {proc.stderr[-1000:]}")
-
-
-def render_panel(*, stl_path: Path, title: str, out_png: Path,
-                 view_bounds: np.ndarray, scratch_dir: Path,
-                 keep_color: str = "#b8c0c8",
-                 remove_color: str = "#dc2626",
-                 remove_indices: list[int] | None = None) -> None:
-    scratch_dir.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "stl_path": str(stl_path),
-        "remove_indices": remove_indices or [],
-        "title": title,
-        "out_path": str(out_png),
-        "view_bounds": view_bounds.tolist(),
-        "keep_color": keep_color,
-        "remove_color": remove_color,
-    }
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
-                                      dir=str(scratch_dir)) as fh:
-        json.dump(payload, fh)
-        payload_path = Path(fh.name)
-    cmd = [sys.executable, "-m", "paramub.shell_render", str(payload_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    payload_path.unlink(missing_ok=True)
-    if proc.returncode != 0:
-        print("[render stderr]:", proc.stderr[-2000:])
-        raise RuntimeError(f"render failed rc={proc.returncode}")
-    if proc.stdout.strip():
-        print(proc.stdout.rstrip())
-
-
-def render_combined(shell_mm: trimesh.Trimesh,
-                     underbody: trimesh.Trimesh,
-                     out_png: Path, scratch_dir: Path,
-                     title_suffix: str = "") -> None:
-    """Render shell + underbody together. Both halves are decimated
-    independently to fit in matplotlib's face budget, then concatenated.
-    Indices [0..N_shell_deci) are shell faces (grey); the rest are
-    underbody faces (rendered as 'REMOVE' = orange for contrast)."""
-    scratch_dir.mkdir(parents=True, exist_ok=True)
-    shell_full = scratch_dir / "shell_full.stl"
-    ub_full = scratch_dir / "ub_full.stl"
-    shell_deci = scratch_dir / "shell_deci.stl"
-    ub_deci = scratch_dir / "ub_deci.stl"
-    shell_mm.export(str(shell_full), file_type="stl")
-    underbody.export(str(ub_full), file_type="stl")
-
-    budget = RENDER_FACE_BUDGET
-    # Split budget roughly evenly between shell and underbody.
-    _decimate_subproc(shell_full, shell_deci, budget // 2)
-    _decimate_subproc(ub_full, ub_deci, budget // 2)
-
-    shell_d = trimesh.load(str(shell_deci), force="mesh", process=False)
-    ub_d = trimesh.load(str(ub_deci), force="mesh", process=False)
-    n_shell_d = len(shell_d.faces)
-    combined = trimesh.util.concatenate([shell_d, ub_d])
-    combined_stl = scratch_dir / "combined_deci.stl"
-    combined.export(str(combined_stl), file_type="stl")
-
-    n_total = len(combined.faces)
-    remove_indices = list(range(n_shell_d, n_total))
-    bounds = combined.bounds.copy()
-    title = (f"Shell ({len(shell_mm.faces):,} → {n_shell_d:,} faces, grey) + "
-             f"parametric underbody ({len(underbody.faces):,} → "
-             f"{len(ub_d.faces):,} faces, orange){title_suffix}")
-    render_panel(
-        stl_path=combined_stl,
-        title=title,
-        out_png=out_png,
-        view_bounds=bounds,
-        scratch_dir=scratch_dir,
-        keep_color="#b8c0c8",       # shell — grey
-        remove_color="#fb923c",     # underbody — orange
-        remove_indices=remove_indices,
-    )
-
-
-def render_underbody_only(underbody: trimesh.Trimesh,
-                            out_png: Path, scratch_dir: Path) -> None:
-    """Render just the underbody (decimated). Useful when the combined
-    render is hard to read."""
-    scratch_dir.mkdir(parents=True, exist_ok=True)
-    ub_full = scratch_dir / "ub_only_full.stl"
-    ub_deci = scratch_dir / "ub_only_deci.stl"
-    underbody.export(str(ub_full), file_type="stl")
-    _decimate_subproc(ub_full, ub_deci, RENDER_FACE_BUDGET)
-    bounds = underbody.bounds.copy()
-    render_panel(
-        stl_path=ub_deci,
-        title=f"Parametric underbody only ({len(underbody.faces):,} faces, "
-              f"shell-aligned, left half)",
-        out_png=out_png,
-        view_bounds=bounds,
-        scratch_dir=scratch_dir,
-        keep_color="#fb923c",
-    )
+    print(f"[cut-poly] wall STL -> {out_path}  "
+          f"({n} pts, z∈[{z_base:.0f},{z_top:.0f}])")
 
 
 # ---------------------------------------------------------------------------
@@ -1255,15 +787,51 @@ def render_underbody_only(underbody: trimesh.Trimesh,
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Integrate parametric underbody with extracted upper shell.")
+        description="Generate a parametric underbody for an extracted shell.")
     p.add_argument("--shell-meta", type=Path, default=DEFAULT_META,
                    help=f"Shell metadata JSON (default {DEFAULT_META}).")
     p.add_argument("--output-dir", "-o", type=Path,
                    default=DEFAULT_OUTPUT_DIR,
                    help=f"Output directory (default {DEFAULT_OUTPUT_DIR}).")
-    p.add_argument("--no-render", action="store_true",
-                   help="Skip the matplotlib render (still writes STL).")
+    p.add_argument("--cut-shrink-mm", type=float, default=100.0,
+                   help="Inward shrink applied to the shell-rim polygon "
+                        "before cutting the UB. Larger = bigger gap to "
+                        "the shell.")
+    p.add_argument("--cut-simplify-mm", type=float, default=10.0,
+                   help="Douglas-Peucker tolerance (mm) used to smooth "
+                        "the shrunk polygon.")
+    p.add_argument("--cut-concave-ratio", type=float, default=0.05,
+                   help="shapely concave_hull ratio. Larger = closer to "
+                        "convex; smaller = follows local indentations.")
+    p.add_argument("--no-trim", action="store_true",
+                   help="Skip the shell-rim trim. Only the untrimmed "
+                        "underbody STL is written.")
+    p.add_argument("--cut-stl-tolerance-mm", type=float, default=0.05,
+                   help="Linear STL chord tolerance for the trimmed "
+                        "underbody. Finer than the untrimmed export "
+                        "(0.1) so the new cut boundary tessellates "
+                        "smoothly.")
+    p.add_argument("--cut-stl-angular-tolerance-rad", type=float,
+                   default=0.05,
+                   help="Angular STL chord tolerance for the trimmed "
+                        "underbody.")
+    p.add_argument("--remesh-target-mm", type=float, default=None,
+                   help="Target edge length (mm) for the pymeshlab "
+                        "isotropic remesh of the trimmed underbody. "
+                        "Default = median edge length of the upper "
+                        "shell.")
+    p.add_argument("--remesh-iterations", type=int, default=6,
+                   help="Iterations for pymeshlab "
+                        "meshing_isotropic_explicit_remeshing.")
+    p.add_argument("--no-remesh", action="store_true",
+                   help="Skip the remesh-to-shell-density pass.")
     return p.parse_args()
+
+
+WHEEL_NAME_MAP = {
+    "wheel_fl": "front_left", "wheel_fr": "front_right",
+    "wheel_rl": "rear_left",  "wheel_rr": "rear_right",
+}
 
 
 def main():
@@ -1276,15 +844,15 @@ def main():
     shell = trimesh.load(str(shell_stl_path), force="mesh", process=False)
     print(f"  shell faces={len(shell.faces):,}  verts={len(shell.vertices):,}")
 
-    # SCALE so wheelbase = 2700 mm. All ParamUB-mm calculations after this
-    # are at scaled (mm) coordinates.
-    wheels = meta["wheels_3d"]
-    wb_shell = abs(wheels[0]["x"] - wheels[1]["x"])
+    # SCALE so wheelbase = 2700 mm. Pair the two most-extreme wheels by x
+    # (smallest x = front-most, largest x = rear-most) so the wheelbase
+    # measurement is robust when meta lists 4 corners.
+    wheels = sorted(meta["wheels_3d"], key=lambda w: w["x"])
+    wb_shell = abs(wheels[-1]["x"] - wheels[0]["x"])
     scale = TARGET_WHEELBASE_MM / wb_shell
     print(f"[scale] shell wheelbase = {wb_shell:.4f}  →  scale = {scale:.2f}  "
           f"(target wheelbase = {TARGET_WHEELBASE_MM:.0f} mm)")
 
-    # Scale the shell vertices into mm and rebuild as a trimesh.
     shell_mm = trimesh.Trimesh(
         vertices=np.asarray(shell.vertices) * scale,
         faces=np.asarray(shell.faces),
@@ -1292,17 +860,18 @@ def main():
     )
 
     hints = extract_hints(shell, meta, scale)
-    # Measure shell front/rear edges at the section Y values used to anchor
-    # the splitter and diffuser Bezier lofts.
-    anchors = measure_shell_anchors(shell_mm, ys=[0.0, 700.0])
-    # Wheelhouses extend +100mm past the rocker line so the boundary trim
-    # has material to clip against the body silhouette.
+    # Splitter loft Y sections: centerline + front wheel center.
+    # Diffuser loft Y sections: centerline + rear wheel center.
+    # The outboard section copies the wheel-center shape (see build_spec).
+    y_int_splitter = hints["front_wheel_y_mm"]
+    y_int_diffuser = hints["rear_wheel_y_mm"]
+    section_ys = sorted({0.0, y_int_splitter, y_int_diffuser})
+    anchors = measure_shell_anchors(shell_mm, ys=section_ys)
     lat_overrides = lateral_clearance_overrides(hints, extra_extend_mm=100.0)
-    spec = build_spec(hints, anchors, lat_overrides=lat_overrides)
+    spec = build_spec(hints, anchors, lat_overrides=lat_overrides,
+                       y_intermediate_splitter=y_int_splitter,
+                       y_intermediate_diffuser=y_int_diffuser)
 
-    # Diagnostic: print splitter / diffuser endpoint positions in BOTH
-    # frames so the user can sanity-check where the curves terminate
-    # relative to the shell's measured anchors.
     midpoint_x = hints["midpoint_x_shell_mm"]
     if spec.splitter_sections:
         print("[splitter endpoints]")
@@ -1319,110 +888,56 @@ def main():
                   f"{s.rear_z_mm:>6.1f})  → shell=({x_shell:>7.1f}, "
                   f"{s.rear_z_mm:>6.1f})")
 
-    print("\n[paramub] build_underbody (half_only=True) ...")
+    print("\n[paramub] build_underbody (full car) ...")
     from paramub.ub_assem import build_underbody
-    asy, layout = build_underbody(spec, half_only=True)
+    asy, layout = build_underbody(spec)
     print(f"[paramub] layout = {layout}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     scratch = args.output_dir / "_scratch"
     scratch.mkdir(parents=True, exist_ok=True)
 
-    # Split the assembly: body (floor + wheelhouses) is processed through
-    # subdivide / align / slice / trim; wheels are rigid bodies that get
-    # only the align transform (no slice, no boundary trim). This lets
-    # us emit the combined-body STL (shell + UB body, capped at y=0) and
-    # per-wheel STLs as separate files.
-    body_cq = None
+    # Split assembly: body (floor + wheelhouses) gets subdivide+align;
+    # wheels are rigid bodies that only need the align transform.
+    underbody_cq = None
     wheels_cq: dict[str, object] = {}
     for child in asy.children:
-        if child.name == "body":
-            body_cq = child.obj
+        if child.name == "underbody":
+            underbody_cq = child.obj
         else:
             wheels_cq[child.name] = child.obj
-    if body_cq is None:
-        raise RuntimeError("Assembly has no child named 'body'")
+    if underbody_cq is None:
+        raise RuntimeError("Assembly has no child named 'underbody'")
 
-    # ---- body: subdivide → align → slice(cap=True) → trim --------------
-    body_raw_stl = scratch / "body_paramub.stl"
-    body_raw = cq_obj_to_trimesh_via_stl(body_cq, body_raw_stl)
-    print(f"[body raw] faces={len(body_raw.faces):,}")
-    # Finer = sharper boundary trim (no large triangle straddling the
-    # polygon boundary). 25 mm gives a clean cut for the rocker / wheel
-    # arch features without blowing up face count too much.
-    max_edge = 25.0
-    print(f"[subdivide] target edge ≤ {max_edge:.0f} mm ...")
-    body_dense = subdivide_to_edge(body_raw, max_edge=max_edge)
-    print(f"[subdivide] body faces: {len(body_raw.faces):,} → "
-          f"{len(body_dense.faces):,}")
-    body_aligned = align_to_shell_frame(body_dense, midpoint_x)
-    body_left = keep_left_half(body_aligned, cap=True)
-    print(f"[body left+cap]  faces={len(body_left.faces):,}  "
-          f"y range=({body_left.bounds[0,1]:.1f}, {body_left.bounds[1,1]:.1f})")
+    # ---- body: align only (no slice, no trim, no subdivide) ------------
+    # subdivide_to_edge was only needed for the boundary trim, which has
+    # been removed.
+    underbody_raw = cq_obj_to_trimesh_via_stl(underbody_cq, scratch / "body_paramub.stl")
+    print(f"[underbody raw] faces={len(underbody_raw.faces):,}")
+    underbody_aligned = align_to_shell_frame(underbody_raw, midpoint_x)
+    print(f"[underbody aligned] faces={len(underbody_aligned.faces):,}  "
+          f"y range=({underbody_aligned.bounds[0,1]:.1f}, "
+          f"{underbody_aligned.bounds[1,1]:.1f})")
 
-    # ---- boundary extraction (uses full shell) -------------------------
-    base = args.shell_meta.stem.replace("_meta", "")
-    # 3D open-edge loops for the boundary curtain STL.
-    loops3d = extract_shell_boundary_loops_3d(shell_mm)
-    print(f"[boundary] {len(loops3d)} open-edge loops in 3D")
-    export_loops_as_curtain_stl(
-        loops3d,
-        args.output_dir / f"{base}_boundary_3d.stl",
-        height=10.0,
-    )
-    # 2D trim polygon: concave hull of all open-edge endpoints (mirrored,
-    # clipped to y≤0).
-    boundary = extract_outer_boundary_polygon(shell_mm)
-    _dump_boundary_debug(
-        shell_mm, boundary,
-        args.output_dir / f"{base}_boundary.png")
-    export_boundary_polygon_stl(
-        boundary,
-        args.output_dir / f"{base}_boundary_xy.stl",
-        z_base=0.0, z_height=5.0)
-    # Trim body — polygon buffered outward by 5 mm so splitter endpoints
-    # exactly at the silhouette and the y=0 cap vertices are not dropped
-    # as "on the boundary".
-    body_trim = trim_to_shell_boundary(body_left, boundary, buffer_mm=5.0)
-    print(f"[body trim]  faces={len(body_trim.faces):,}  "
-          f"y range=({body_trim.bounds[0,1]:.1f}, {body_trim.bounds[1,1]:.1f})")
-
-    # ---- wheels: align only (no slice, no trim) ------------------------
+    # ---- wheels: align only --------------------------------------------
     wheel_meshes: dict[str, trimesh.Trimesh] = {}
     for name, cq_obj in wheels_cq.items():
-        w_stl = scratch / f"{name}_paramub.stl"
-        w_raw = cq_obj_to_trimesh_via_stl(cq_obj, w_stl)
-        w_aligned = align_to_shell_frame(w_raw, midpoint_x)
-        wheel_meshes[name] = w_aligned
-        print(f"[wheel] {name:<10s} faces={len(w_aligned.faces):,}  "
-              f"y range=({w_aligned.bounds[0,1]:.1f}, "
-              f"{w_aligned.bounds[1,1]:.1f})")
-
-    # ---- shell: keep left half and cap at y=0 -------------------------
-    # The shell was already pre-cut at y=0 by run_shell.py, so
-    # slice_mesh_plane has nothing to slice — the boundary is there but
-    # never closed (visible as a jagged edge in Blender). cap_open_
-    # boundary_at_y0 finds those near-y=0 open edges, snaps them flat,
-    # and triangulates a custom cap.
-    shell_left = keep_left_half(shell_mm, cap=False)   # drop any y>0
-    shell_left = cap_open_boundary_at_y0(shell_left, y_tol=1e-3)
-    print(f"[shell left+cap] faces={len(shell_left.faces):,}  "
-          f"y range=({shell_left.bounds[0,1]:.1f}, {shell_left.bounds[1,1]:.1f})")
+        w_raw = cq_obj_to_trimesh_via_stl(
+            cq_obj, scratch / f"{name}_paramub.stl")
+        wheel_meshes[name] = align_to_shell_frame(w_raw, midpoint_x)
+        print(f"[wheel] {name:<10s} faces={len(wheel_meshes[name].faces):,}")
 
     # ---- outputs --------------------------------------------------------
-    combined_body = trimesh.util.concatenate([shell_left, body_trim])
-    out_combined = args.output_dir / f"{base}_combined_body.stl"
-    combined_body.export(str(out_combined), file_type="stl")
-    print(f"[out] {out_combined}  ({len(combined_body.faces):,} faces)")
+    base = args.shell_meta.stem.replace("_meta", "")
+    out_shell = args.output_dir / f"{base}_shell.stl"
+    shell_mm.export(str(out_shell), file_type="stl")
+    print(f"[out] {out_shell}  ({len(shell_mm.faces):,} faces, "
+          f"scaled to mm)")
 
-    out_body = args.output_dir / f"{base}_body.stl"
-    body_trim.export(str(out_body), file_type="stl")
-    print(f"[out] {out_body}  ({len(body_trim.faces):,} faces)")
+    out_underbody = args.output_dir / f"{base}_underbody.stl"
+    underbody_aligned.export(str(out_underbody), file_type="stl")
+    print(f"[out] {out_underbody}  ({len(underbody_aligned.faces):,} faces)")
 
-    WHEEL_NAME_MAP = {
-        "wheel_fl": "front_left",  "wheel_fr": "front_right",
-        "wheel_rl": "rear_left",   "wheel_rr": "rear_right",
-    }
     wheel_out_paths: dict[str, str] = {}
     for name, mesh in wheel_meshes.items():
         short = WHEEL_NAME_MAP.get(name, name)
@@ -1431,24 +946,95 @@ def main():
         wheel_out_paths[name] = str(out_wheel)
         print(f"[out] {out_wheel}  ({len(mesh.faces):,} faces)")
 
-    # ---- debug renders --------------------------------------------------
-    if not args.no_render:
-        # Render: pass the (full) shell + body+wheels concatenated so the
-        # iso views show the complete assembly.
-        ub_for_render = trimesh.util.concatenate(
-            [body_trim, *wheel_meshes.values()])
-        out_render = args.output_dir / f"{base}_combined.png"
-        try:
-            render_combined(shell_left, ub_for_render, out_render, scratch)
-            print(f"[out] {out_render}")
-        except Exception as exc:
-            print(f"[warn] render_combined failed: {exc}")
-        out_render_ub = args.output_dir / f"{base}_underbody_only.png"
-        try:
-            render_underbody_only(ub_for_render, out_render_ub, scratch)
-            print(f"[out] {out_render_ub}")
-        except Exception as exc:
-            print(f"[warn] render_underbody_only failed: {exc}")
+    # ---- shell-rim trim ------------------------------------------------
+    cut_meta: dict = {}
+    out_underbody_trimmed = None
+    if not args.no_trim:
+        print(f"\n[cut-poly] building shell-rim cut polygon "
+              f"(shrink={args.cut_shrink_mm} mm, "
+              f"simplify={args.cut_simplify_mm} mm, "
+              f"concave_ratio={args.cut_concave_ratio})")
+        polygon = build_shell_cut_polygon(
+            shell_mm,
+            shrink_mm=args.cut_shrink_mm,
+            simplify_mm=args.cut_simplify_mm,
+            concave_ratio=args.cut_concave_ratio)
+        if polygon is None:
+            print("[cut-poly] no polygon produced; skipping trim")
+        else:
+            wall_path = args.output_dir / f"{base}_cut_polygon.stl"
+            z_top = float(underbody_aligned.bounds[1, 2])
+            export_polygon_as_wall_stl(
+                polygon, wall_path,
+                z_base=0.0, z_top=z_top)
+
+            # BREP cut: intersect the CadQuery Compound (analytical
+            # geometry) with the polygon prism, THEN tessellate. The
+            # cut boundary becomes a real curve on each face, so STL
+            # triangulation along the cut is smooth instead of stepping
+            # along the floor's coarse pre-existing triangles.
+            cut_cq = cut_underbody_cq_with_polygon(
+                underbody_cq, polygon, midpoint_x)
+            cut_stl = scratch / "underbody_cut_paramub.stl"
+            cut_tol = args.cut_stl_tolerance_mm
+            cut_ang = args.cut_stl_angular_tolerance_rad
+            print(f"[brep-cut] tessellating trimmed compound "
+                  f"(linear_tol={cut_tol} mm, "
+                  f"angular_tol={cut_ang} rad)")
+            underbody_trimmed_raw = cq_obj_to_trimesh_via_stl(
+                cut_cq, cut_stl,
+                tolerance=cut_tol,
+                angular_tolerance=cut_ang)
+            underbody_trimmed = align_to_shell_frame(
+                underbody_trimmed_raw, midpoint_x)
+            n_pre_remesh = int(len(underbody_trimmed.faces))
+
+            # Remesh to roughly match the upper-shell's edge density so
+            # downstream booleans / projections see a comparable resolution
+            # on both meshes. Uses pymeshlab's isotropic-explicit remesher
+            # (C++; bounded memory). Skipped on --no-remesh.
+            remesh_target = None
+            if not args.no_remesh:
+                if args.remesh_target_mm is not None:
+                    remesh_target = float(args.remesh_target_mm)
+                else:
+                    shell_edge_lengths = shell_mm.edges_unique_length
+                    remesh_target = float(np.median(shell_edge_lengths))
+                print(f"[remesh] target edge = {remesh_target:.2f} mm "
+                      f"(shell median edge = "
+                      f"{float(np.median(shell_mm.edges_unique_length)):.2f} mm)")
+                try:
+                    underbody_trimmed = remesh_underbody_isotropic(
+                        underbody_trimmed,
+                        target_edge_mm=remesh_target,
+                        iterations=args.remesh_iterations,
+                        scratch_dir=scratch)
+                except ImportError as exc:
+                    print(f"[remesh] pymeshlab not importable ({exc}); "
+                          f"pass --no-remesh or set LD_LIBRARY_PATH="
+                          f"$CONDA_PREFIX/lib")
+                    raise
+
+            out_underbody_trimmed = (
+                args.output_dir / f"{base}_underbody_trimmed.stl")
+            underbody_trimmed.export(str(out_underbody_trimmed),
+                                      file_type="stl")
+            print(f"[out] {out_underbody_trimmed}  "
+                  f"({len(underbody_trimmed.faces):,} faces)")
+            cut_meta = {
+                "cut_shrink_mm": args.cut_shrink_mm,
+                "cut_simplify_mm": args.cut_simplify_mm,
+                "cut_concave_ratio": args.cut_concave_ratio,
+                "cut_stl_tolerance_mm": cut_tol,
+                "cut_stl_angular_tolerance_rad": cut_ang,
+                "cut_polygon_area_mm2": float(polygon.area),
+                "cut_polygon_exterior_length_mm": float(polygon.exterior.length),
+                "underbody_trimmed_faces_pre_remesh": n_pre_remesh,
+                "underbody_trimmed_faces": int(len(underbody_trimmed.faces)),
+                "remesh_target_mm": remesh_target,
+                "out_underbody_trimmed_stl": str(out_underbody_trimmed),
+                "out_cut_polygon_wall_stl": str(wall_path),
+            }
 
     # ---- meta dump ------------------------------------------------------
     debug_meta = {
@@ -1456,47 +1042,18 @@ def main():
         "shell_anchors": anchors,
         "spec": _spec_to_jsonable(spec),
         "layout": layout,
-        "body_raw_faces": int(len(body_raw.faces)),
-        "body_dense_faces": int(len(body_dense.faces)),
-        "body_left_faces": int(len(body_left.faces)),
-        "body_trim_faces": int(len(body_trim.faces)),
-        "shell_left_faces": int(len(shell_left.faces)),
-        "combined_body_faces": int(len(combined_body.faces)),
+        "underunderbody_raw_faces": int(len(underbody_raw.faces)),
+        "underunderbody_aligned_faces": int(len(underbody_aligned.faces)),
         "wheels": {name: {"faces": int(len(m.faces))}
                     for name, m in wheel_meshes.items()},
-        "out_combined_body_stl": str(out_combined),
-        "out_body_stl": str(out_body),
+        "out_shell_stl": str(out_shell),
+        "out_underbody_stl": str(out_underbody),
         "out_wheel_stls": wheel_out_paths,
+        **cut_meta,
     }
     (args.output_dir / f"{base}_integrate_meta.json").write_text(
         json.dumps(debug_meta, indent=2, default=float))
     return 0
-
-
-def _dump_boundary_debug(shell_mm, polygon, out_png: Path) -> None:
-    """Save a top-down PNG: shell xy footprint + boundary polygon."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(10, 6))
-    # Shell vertices (xy scatter)
-    v = shell_mm.vertices
-    ax.scatter(v[::50, 0], v[::50, 1], s=0.5, c="#888", alpha=0.3,
-                label="shell verts (subsampled)")
-    # Boundary polygon
-    if hasattr(polygon, "exterior"):
-        ex = np.asarray(polygon.exterior.coords)
-        ax.plot(ex[:, 0], ex[:, 1], "r-", linewidth=1.5,
-                 label="boundary polygon (concave hull of open edges)")
-    ax.set_aspect("equal")
-    ax.set_xlabel("x (mm)")
-    ax.set_ylabel("y (mm)")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.set_title("Shell xy footprint + trim boundary polygon")
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=120)
-    plt.close(fig)
-    print(f"[debug] wrote {out_png}")
 
 
 def _spec_to_jsonable(spec):

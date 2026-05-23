@@ -180,5 +180,4 @@ if __name__ == "__main__":
         output_parts=True,
         export_step=True,
         stl_tolerance_mm=0.1,
-        half_only=True,
     )

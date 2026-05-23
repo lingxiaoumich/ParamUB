@@ -227,88 +227,8 @@ def s1_canonicalize(in_path: Path | str,
     return new, frame
 
 
-# ===========================================================================
-# Step 2: clean planar cut at y = 0
-# ===========================================================================
-
-def clean_y0_boundary(mesh: trimesh.Trimesh,
-                       verbose: bool = True) -> trimesh.Trimesh:
-    """Snap "tooth-tip" vertices to exactly y=0.
-
-    Step 2 (``s2_keep_left``) gives a clean planar cut, but the later
-    cylinder / wheelhouse / visibility steps re-cut the mesh and can
-    produce open boundary edges where ONE endpoint sits exactly at y=0
-    (a survivor from step 2) and the OTHER drifts a few millimetres
-    inboard. The resulting boundary looks jagged in 3D viewers and
-    prevents downstream tools (e.g. integrate_underbody's y=0 cap) from
-    finding a single clean polygon to triangulate.
-
-    Strategy:
-      1. Collect open boundary edges (edges in exactly one face).
-      2. Pick "tooth" edges: exactly one endpoint at y=0 (within 1e-9).
-      3. Snap the off-axis endpoint to y=0.
-      4. Re-build the mesh with ``process=True`` so any zero-area face
-         that resulted from a tip and base coinciding is cleaned out.
-
-    Call right before the final STL export.
-    """
-    v = np.asarray(mesh.vertices, dtype=np.float64).copy()
-    edges = mesh.edges_sorted
-    unique, counts = np.unique(edges, axis=0, return_counts=True)
-    boundary_pairs = unique[counts == 1]
-    y_at_0 = np.abs(v[:, 1]) < 1e-9
-    mixed = (y_at_0[boundary_pairs[:, 0]] ^ y_at_0[boundary_pairs[:, 1]])
-    teeth = boundary_pairs[mixed]
-    if len(teeth) == 0:
-        if verbose:
-            print("[y0-clean] no tooth edges at y=0; nothing to do")
-        return mesh
-    off_axis = np.where(
-        y_at_0[teeth[:, 0]], teeth[:, 1], teeth[:, 0])
-    off_axis = np.unique(off_axis)
-    if verbose:
-        off_y = np.abs(v[off_axis, 1])
-        print(f"[y0-clean] {len(teeth):,} tooth edges, {len(off_axis):,} "
-              f"unique off-axis tips (|y| mean={off_y.mean():.5f}, "
-              f"max={off_y.max():.5f}); snapping to y=0")
-    v[off_axis, 1] = 0.0
-    cleaned = trimesh.Trimesh(
-        vertices=v, faces=np.asarray(mesh.faces, dtype=np.int64),
-        process=True)
-    if verbose:
-        new_at_0 = int(np.sum(np.abs(cleaned.vertices[:, 1]) < 1e-9))
-        print(f"[y0-clean] verts at y=0: {int(np.sum(y_at_0)):,} → "
-              f"{new_at_0:,}; faces: {len(mesh.faces):,} → "
-              f"{len(cleaned.faces):,}")
-    return cleaned
-
-
-def s2_keep_left(mesh: trimesh.Trimesh,
-                 verbose: bool = True
-                 ) -> trimesh.Trimesh:
-    """Slice the mesh at the y = 0 symmetry plane and keep the y ≤ 0
-    half. Faces straddling the plane are split with new vertices
-    inserted exactly on y = 0 so the cut edge is a clean planar
-    boundary loop. Uses :func:`trimesh.intersections.slice_mesh_plane`
-    with ``cap=False`` (the boundary stays open, not filled with a
-    planar cap)."""
-    cut = trimesh.intersections.slice_mesh_plane(
-        mesh,
-        plane_normal=np.array([0.0, -1.0, 0.0]),
-        plane_origin=np.array([0.0, 0.0, 0.0]),
-        cap=False,
-    )
-    cut.face_normals = None
-    if verbose:
-        n_before = len(mesh.faces)
-        n_after = len(cut.faces)
-        n_on_plane = int(np.sum(np.abs(cut.vertices[:, 1]) < 1e-8))
-        print(f"[s2] sliced at y=0: {n_before:,} -> {n_after:,} faces "
-              f"({100.0 * n_after / n_before:.1f}%)")
-        print(f"[s2] cropped bounds:\n{cut.bounds}")
-        print(f"[s2] vertices on y=0 plane: {n_on_plane:,} "
-              f"(clean planar boundary)")
-    return cut
+# Step 2 (clean planar cut at y=0) was removed when the pipeline moved
+# to full-car extraction. See git history for the old implementation.
 
 
 # ===========================================================================
@@ -369,6 +289,62 @@ def s3_locate_wheel_xy(mesh: trimesh.Trimesh,
     if verbose:
         print(f"[s3] z-band [0.0, {z_band_height}] -> {len(pts):,} pts "
               f"clustered into {len(wheels)} wheel footprints:")
+        for i, w in enumerate(wheels):
+            print(f"     wheel {i}: x={w.x:+.4f}  y={w.y:+.4f}  "
+                  f"npts={w.n_points}")
+    return wheels
+
+
+def s3_locate_wheel_xy_full(mesh: trimesh.Trimesh,
+                             z_band_height: float = 0.02,
+                             n_axles: int = 2,
+                             verbose: bool = True
+                             ) -> list[WheelXY]:
+    """Full-car analogue of :func:`s3_locate_wheel_xy`.
+
+    Cluster the ground-contact band by x into ``n_axles`` axles, then
+    split each axle cluster by y sign so we get one wheel per (axle,
+    side) corner. Returns ``2 * n_axles`` wheels sorted rear → front,
+    left → right within each axle."""
+    centroids = np.asarray(mesh.triangles_center, dtype=np.float64)
+    z = centroids[:, 2]
+    mask = (z >= 0.0) & (z <= z_band_height)
+    pts = centroids[mask][:, :2]
+    if len(pts) < 10 * n_axles:
+        raise RuntimeError(f"s3-full: only {len(pts)} face centroids in "
+                           f"the z<={z_band_height} band — not enough to "
+                           f"locate {n_axles} axles.")
+    x = pts[:, 0]
+    x_min, x_max = float(x.min()), float(x.max())
+    centers = np.linspace(x_min, x_max, n_axles)
+    for _ in range(50):
+        d = np.abs(x[:, None] - centers[None, :])
+        assign = np.argmin(d, axis=1)
+        new_centers = np.array([
+            x[assign == k].mean() if (assign == k).any() else centers[k]
+            for k in range(n_axles)
+        ])
+        if np.allclose(new_centers, centers, atol=1e-6):
+            break
+        centers = new_centers
+    wheels: list[WheelXY] = []
+    for k in range(n_axles):
+        cluster = pts[assign == k]
+        if len(cluster) == 0:
+            continue
+        x_mean = float(cluster[:, 0].mean())
+        for sign in (-1, +1):
+            side = cluster[cluster[:, 1] * sign > 0]
+            if len(side) == 0:
+                continue
+            wheels.append(WheelXY(x=x_mean,
+                                   y=float(side[:, 1].mean()),
+                                   n_points=int(len(side))))
+    # Rear (large x) first; within each axle, smaller y (left) first.
+    wheels.sort(key=lambda w: (-w.x, w.y))
+    if verbose:
+        print(f"[s3-full] z-band [0.0, {z_band_height}] -> {len(pts):,} pts "
+              f"-> {n_axles} axles, {len(wheels)} corners:")
         for i, w in enumerate(wheels):
             print(f"     wheel {i}: x={w.x:+.4f}  y={w.y:+.4f}  "
                   f"npts={w.n_points}")
@@ -539,16 +515,26 @@ def s5_cylinder_remove(mesh: trimesh.Trimesh,
 
 def _fibonacci_directions(n: int) -> np.ndarray:
     """``(n, 3)`` quasi-uniform unit vectors on the sphere via the
-    Fibonacci lattice."""
-    i = np.arange(n, dtype=np.float64) + 0.5
-    phi = np.arccos(1.0 - 2.0 * i / n)
+    Fibonacci lattice, made symmetric across the y = 0 plane so the
+    ray-casting passes treat left- and right-side faces identically.
+
+    Implementation: generate ``ceil(n/2)`` raw Fibonacci dirs, then
+    pair each with its y-mirror; trim back to ``n``. The mirror pairing
+    preserves elevation (z is unchanged), so upper/lower hemisphere
+    splits used by step 7 still come out balanced.
+    """
+    half = (n + 1) // 2
+    i = np.arange(half, dtype=np.float64) + 0.5
+    phi = np.arccos(1.0 - 2.0 * i / half)
     golden = np.pi * (1.0 + np.sqrt(5.0))
     theta = golden * i
     z = np.cos(phi)
     r = np.sin(phi)
     x = r * np.cos(theta)
     y = r * np.sin(theta)
-    return np.column_stack([x, y, z])
+    dirs = np.column_stack([x, y, z])
+    mirror = dirs * np.array([1.0, -1.0, 1.0])
+    return np.vstack([dirs, mirror])[:n]
 
 
 def _build_intersector(mesh: trimesh.Trimesh):
@@ -566,8 +552,9 @@ def _wheel_origin_set(w: "WheelCenter",
                       include_hub: bool = True,
                       ) -> list[np.ndarray]:
     """Origin set used by s6a: hub centre + ``n_upper_edge`` points on
-    the upper half of the cylinder's inboard edge. The inboard edge
-    is the circle at ``y = w.y + axial_half`` (cabin side); upper
+    the upper half of the cylinder's inboard edge — the cabin side of
+    the wheel. Inboard is ``-axial_half`` for a right-side wheel
+    (y > 0) and ``+axial_half`` for a left-side wheel (y < 0). Upper
     half means θ ∈ [0, π] so z ≥ w.z."""
     origins: list[np.ndarray] = []
     if include_hub:
@@ -577,7 +564,8 @@ def _wheel_origin_set(w: "WheelCenter",
     thetas = (np.linspace(0.0, np.pi, n_upper_edge)
               if n_upper_edge > 1 else np.array([np.pi / 2]))
     rp = edge_radial_frac * w.radius
-    y_edge = w.y + w.axial_half
+    inboard_sign = -1.0 if w.y > 0 else +1.0   # toward y=0
+    y_edge = w.y + inboard_sign * w.axial_half
     for th in thetas:
         origins.append(np.array([w.x + rp * np.cos(th),
                                  float(y_edge),
@@ -763,18 +751,20 @@ def s6b_wheelhouse_zone_inward(mesh: trimesh.Trimesh,
 
 def _wheel_cyl_y_bounds(w: "WheelCenter",
                          axial_factor: float,
-                         outboard_y_limit: float | None,
+                         outboard_y_limit: "tuple[float, float] | None",
                          ) -> tuple[float, float]:
     """Per-wheel (y_lo, y_hi) for the cut-zone cylinder. Symmetric
-    if ``outboard_y_limit`` is None; otherwise the outboard end is
-    pulled out to ``outboard_y_limit``."""
+    around the wheel hub if ``outboard_y_limit`` is None; otherwise
+    the outboard end is pulled out to ``outboard_y_limit`` —
+    ``outboard_y_limit[0]`` for left-side wheels (y<0) and
+    ``outboard_y_limit[1]`` for right-side wheels (y≥0)."""
     half = axial_factor * w.axial_half
     if outboard_y_limit is None:
         return w.y - half, w.y + half
+    y_neg, y_pos = outboard_y_limit
     if w.y < 0:
-        return outboard_y_limit, w.y + half
-    else:
-        return w.y - half, outboard_y_limit
+        return y_neg, w.y + half
+    return w.y - half, y_pos
 
 
 def build_cut_zone(mesh: trimesh.Trimesh,
@@ -782,7 +772,7 @@ def build_cut_zone(mesh: trimesh.Trimesh,
                    floor_z_max: float,
                    wheel_radius_factor: float = 1.3,
                    wheel_axial_factor: float = 1.3,
-                   outboard_y_limit: float | None = None,
+                   outboard_y_limit: "tuple[float, float] | None" = None,
                    verbose: bool = True
                    ) -> np.ndarray:
     """Return a boolean face-mask: True = the face is *eligible* to be
@@ -808,8 +798,10 @@ def build_cut_zone(mesh: trimesh.Trimesh,
         in_wheel_total |= in_wheel
         cut |= in_wheel
     if verbose:
-        outboard_str = (f", outboard end → y={outboard_y_limit:+.4f}"
-                        if outboard_y_limit is not None else "")
+        outboard_str = (
+            f", outboard ends → y∈[{outboard_y_limit[0]:+.4f}, "
+            f"{outboard_y_limit[1]:+.4f}]"
+            if outboard_y_limit is not None else "")
         print(f"[cut-zone] floor (z < {floor_z_max:.4f}): "
               f"{int(in_floor.sum()):,} faces")
         print(f"[cut-zone] wheel cylinders ({wheel_radius_factor}× r, "
@@ -826,7 +818,7 @@ def build_cut_zone_volume_mesh(wheels: Sequence["WheelCenter"],
                                 floor_y_range: tuple[float, float],
                                 wheel_radius_factor: float = 1.3,
                                 wheel_axial_factor: float = 1.3,
-                                outboard_y_limit: float | None = None,
+                                outboard_y_limit: "tuple[float, float] | None" = None,
                                 sections: int = 48,
                                 ) -> trimesh.Trimesh:
     """Build a debug STL showing the cut-zone volume: floor box +

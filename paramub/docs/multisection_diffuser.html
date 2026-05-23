@@ -95,13 +95,6 @@
   lofts meet the flat floor with C1 continuity at the kicklines by
   construction — you don't tune anything for it.
 </div>
-<div class="callout info">
-  <strong>Left-half output (<code>half_only=True</code>).</strong>
-  Multisection lofts work in either full-car or left-half mode. With
-  <code>half_only=True</code>, the body is sliced at y=0 after the loft;
-  the splitter, flat floor, and diffuser are all carried into the half
-  cleanly.
-</div>
 
 <h2 id="layers">Three-layer API</h2>
 <p>
@@ -516,8 +509,7 @@ spec = UnderbodySpec(
 )
 
 generate(spec, output_dir="outputs/UB1", stem="ub",
-         output_mode="all", output_parts=True, export_step=True,
-         half_only=True)   # left-half (y &lt; 0) only
+         output_mode="all", output_parts=True, export_step=True)
 </pre>
 
 <p>

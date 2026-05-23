@@ -1,7 +1,7 @@
 """Driver for the upper-body shell extraction pipeline.
 
-Runs steps 1-7 from :mod:`paramub.shell_extract` on a source STL and
-writes the final single-component upper shell to ``outputs/shell/``.
+Runs the full-car (no y=0 cut) extraction on a source STL and writes
+the final upper shell to ``outputs/shell/``.
 
 Pipeline summary (see :mod:`paramub.shell_extract` for the full step
 docstrings):
@@ -9,7 +9,6 @@ docstrings):
     1.  canonicalize         — rotate to canonical (+x rearward, +y
                                 lateral, +z up); ground-snap to z=0;
                                 centre on x=0
-    2.  keep-left            — clean planar cut at y=0 (slice_mesh_plane)
     3.  wheel (x, y)         — z-slab cluster
     4.  wheel hub Z + radius — Y-slab + component-from-contact + circle fit
     5.  cylinder remove      — tight tire-hugging cylinder + keep-largest
@@ -17,6 +16,11 @@ docstrings):
     7.  lower cut            — two-hemisphere visibility classifier
                                 constrained to a cut zone
                                 (floor band ∪ enlarged wheel cylinders)
+    8.  rim re-cut           — extract the longest open-boundary loop of
+                                the step-7 shell and use it to flood-cut
+                                the canonical (raw) mesh — fills in any
+                                small holes accidentally introduced by
+                                steps 5-7.
 
 Usage::
 
@@ -28,12 +32,17 @@ Usage::
     python run_shell.py --input X --output Y
 
 Outputs (always):
-    outputs/shell/<basename>_final.stl  — single-component upper shell
-    outputs/shell/<basename>_meta.json  — numeric metadata
+    outputs/shell/<basename>_final.stl   — single-component upper shell
+                                            (raw output of steps 1, 3–7)
+    outputs/shell/<basename>_upper_recut.stl
+                                         — re-cut from canonical mesh
+                                            using the longest boundary
+                                            loop of _final.stl as a
+                                            3-D cutter (no small holes)
+    outputs/shell/<basename>_meta.json   — numeric metadata
 
 Outputs (--debug):
     outputs/shell/<basename>_debug/step1_canonical.stl
-                                  /step2_left_half.stl
                                   /step5_kept.stl
                                   /step5_wheel_cylinders.stl
                                   /step6a_kept.stl
@@ -65,15 +74,19 @@ import trimesh
 from paramub.shell_extract import (
     LABEL_KEEP, LABEL_REMOVE, LABEL_DROP,
     build_cut_zone, build_cut_zone_volume_mesh,
-    clean_y0_boundary,
     edges_to_tube_mesh,
     keep_largest_component, split_keep_remove,
-    s1_canonicalize, s2_keep_left,
-    s3_locate_wheel_xy, s4_locate_wheel_z,
+    s1_canonicalize,
+    s3_locate_wheel_xy_full, s4_locate_wheel_z,
     s5_cylinder_remove,
     s6a_wheel_center_visibility, s6b_wheelhouse_zone_inward,
     s7_classify_visibility,
     trace_boundary_edges,
+)
+from paramub.shell_recut import (
+    recut_with_longest_rim,
+    find_open_boundary_components,
+    export_edges_as_tubes,
 )
 
 
@@ -204,6 +217,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--render", action="store_true",
                    help="Render per-step PNG composites to "
                         "<output>/<name>_renders/.")
+    p.add_argument("--prefilter-normal-z-max", type=float, default=-0.30,
+                   help="Step 7 prefilter: faces with normal_z below this "
+                        "and z in the bottom prefilter_z_band_frac of the "
+                        "envelope are pre-marked lower_visible (cheap "
+                        "underbody flag). More negative (closer to -1) = "
+                        "stricter, fewer pre-marks. Default -0.30.")
     return p.parse_args()
 
 
@@ -259,48 +278,25 @@ def main():
             show_axes=True,
         )
 
-    # =====================================================================
-    # Step 2 — clean planar cut at y=0
-    # =====================================================================
-    body2 = s2_keep_left(body1)
-    meta["step2_faces"] = int(len(body2.faces))
-
-    if args.debug:
-        body2.export(str(debug_dir / "step2_left_half.stl"), file_type="stl")
-        print(f"  [debug] step2_left_half.stl ({len(body2.faces):,} faces)")
-    if args.render:
-        body2_deci = _decimate_to_stl(body2, RENDER_DECIMATE_TARGET,
-                                      scratch_dir, "step2_body")
-        _render_panel(
-            body_stl=body2_deci,
-            remove_mask=np.zeros(_load_face_count(body2_deci), dtype=bool),
-            title="Step 2 — clean planar cut at y=0 (keep y≤0)",
-            out_path=render_dir / "step2_left_half.png",
-            view_bounds=body2.bounds.copy(),
-            scratch_dir=scratch_dir,
-            show_y_plane=True,
-        )
-
-    # Build a "protect" mask of faces touching the y=0 symmetry plane.
-    # keep_largest_component will not drop these during the s5 / s6
-    # debris passes — preserves the clean planar boundary.
-    verts_on_plane = np.abs(body2.vertices[:, 1]) < PLANE_EPS
-    face_on_y0 = verts_on_plane[body2.faces].any(axis=1)
-    print(f"  [protect] {int(face_on_y0.sum()):,} faces touch y=0 plane "
-          f"(protected from debris drop in s5/s6)")
+    # Step 2 (planar cut at y=0) is intentionally skipped: extract operates
+    # on the full canonical mesh. Wheel detection, cylinder removal,
+    # wheelhouse removal, and the visibility classifier are all per-wheel
+    # or per-face and work on both sides of the car.
+    body = body1
+    body_deci = body1_deci if args.render else None
 
     # =====================================================================
-    # Step 3 — wheel (x, y) footprints
+    # Step 3 — wheel (x, y) footprints (full car: 4 corners)
     # =====================================================================
-    wheels_xy = s3_locate_wheel_xy(body2, z_band_height=0.02, n_expected=2)
+    wheels_xy = s3_locate_wheel_xy_full(body, z_band_height=0.02, n_axles=2)
     meta["wheels_xy"] = [asdict(w) for w in wheels_xy]
     if args.render:
         _render_panel(
-            body_stl=body2_deci,
-            remove_mask=np.zeros(_load_face_count(body2_deci), dtype=bool),
+            body_stl=body_deci,
+            remove_mask=np.zeros(_load_face_count(body_deci), dtype=bool),
             title="Step 3 — wheel (x, y) footprints from z-slice (magenta = footprint)",
             out_path=render_dir / "step3_wheel_xy.png",
-            view_bounds=body2.bounds.copy(),
+            view_bounds=body.bounds.copy(),
             scratch_dir=scratch_dir,
             wheels_xy=wheels_xy, wheels_xy_color="#c026d3",
         )
@@ -308,15 +304,15 @@ def main():
     # =====================================================================
     # Step 4 — wheel hub Z + radius
     # =====================================================================
-    wheels = s4_locate_wheel_z(body2, wheels_xy)
+    wheels = s4_locate_wheel_z(body, wheels_xy)
     meta["wheels_3d"] = [asdict(w) for w in wheels]
     if args.render:
         _render_panel(
-            body_stl=body2_deci,
-            remove_mask=np.zeros(_load_face_count(body2_deci), dtype=bool),
+            body_stl=body_deci,
+            remove_mask=np.zeros(_load_face_count(body_deci), dtype=bool),
             title="Step 4 — refined wheel hub + radius (orange = hub)",
             out_path=render_dir / "step4_wheel_z.png",
-            view_bounds=body2.bounds.copy(),
+            view_bounds=body.bounds.copy(),
             scratch_dir=scratch_dir,
             wheels_3d=wheels, wheels_3d_color="#ea580c",
         )
@@ -325,15 +321,14 @@ def main():
     # Step 5 — wheel cylinder removal (tight envelope, factors 1.00)
     # =====================================================================
     cyl_rfac, cyl_afac = 1.00, 1.00
-    remove5_raw = s5_cylinder_remove(body2, wheels,
+    remove5_raw = s5_cylinder_remove(body, wheels,
                                      radius_factor=cyl_rfac,
                                      axial_factor=cyl_afac)
-    remove5 = keep_largest_component(body2, remove5_raw,
-                                     protect_mask=face_on_y0)
+    remove5 = keep_largest_component(body, remove5_raw)
     meta["step5_faces"] = int((~remove5).sum())
 
     if args.debug:
-        _export_keep(body2, remove5, debug_dir / "step5_kept.stl")
+        _export_keep(body, remove5, debug_dir / "step5_kept.stl")
         # Debug overlay: the cylinder primitives themselves.
         from paramub.shell_extract import _wheel_cyl_y_bounds  # type: ignore
         # Use a thin overlay: the s5 cylinder uses radius_factor=1 and
@@ -351,7 +346,7 @@ def main():
                             file_type="stl")
         print(f"  [debug] step5_kept.stl + step5_wheel_cylinders.stl")
     if args.render:
-        body5_kept_mesh, _ = split_keep_remove(body2, remove5)
+        body5_kept_mesh, _ = split_keep_remove(body, remove5)
         body5_deci = _decimate_to_stl(body5_kept_mesh, RENDER_DECIMATE_TARGET,
                                       scratch_dir, "step5_body")
         rm5_deci = np.zeros(_load_face_count(body5_deci), dtype=bool)
@@ -373,7 +368,7 @@ def main():
     # Step 6a — wheel-center ray visibility
     # =====================================================================
     r6a = s6a_wheel_center_visibility(
-        body2, wheels,
+        body, wheels,
         n_rays_per_origin=16384,
         n_upper_edge=6, edge_radial_frac=1.0,
         include_hub_origin=True,
@@ -381,14 +376,13 @@ def main():
         z_max_factor=2.2,
         exclude_mask=remove5,
     )
-    remove6a = keep_largest_component(body2, remove5 | r6a,
-                                       protect_mask=face_on_y0)
+    remove6a = keep_largest_component(body, remove5 | r6a)
     meta["step6a_faces"] = int((~remove6a).sum())
     if args.debug:
-        _export_keep(body2, remove6a, debug_dir / "step6a_kept.stl")
+        _export_keep(body, remove6a, debug_dir / "step6a_kept.stl")
         print(f"  [debug] step6a_kept.stl")
     if args.render:
-        body6a_kept_mesh, _ = split_keep_remove(body2, remove6a)
+        body6a_kept_mesh, _ = split_keep_remove(body, remove6a)
         body6a_deci = _decimate_to_stl(body6a_kept_mesh, RENDER_DECIMATE_TARGET,
                                        scratch_dir, "step6a_body")
         _render_panel(
@@ -404,19 +398,18 @@ def main():
     # =====================================================================
     # Step 6b — wheelhouse-zone inward (geometric backstop)
     # =====================================================================
-    r6b = s6b_wheelhouse_zone_inward(body2, wheels,
+    r6b = s6b_wheelhouse_zone_inward(body, wheels,
                                       radius_factor=1.4,
                                       axial_factor=1.7,
                                       inward_cos_threshold=0.3,
                                       extend_inboard_to_y=0.0)
-    remove6b = keep_largest_component(body2, remove6a | r6b,
-                                       protect_mask=face_on_y0)
+    remove6b = keep_largest_component(body, remove6a | r6b)
     meta["step6b_faces"] = int((~remove6b).sum())
     if args.debug:
-        _export_keep(body2, remove6b, debug_dir / "step6b_kept.stl")
+        _export_keep(body, remove6b, debug_dir / "step6b_kept.stl")
         print(f"  [debug] step6b_kept.stl")
     if args.render:
-        body6b_kept_mesh, _ = split_keep_remove(body2, remove6b)
+        body6b_kept_mesh, _ = split_keep_remove(body, remove6b)
         body6b_deci = _decimate_to_stl(body6b_kept_mesh, RENDER_DECIMATE_TARGET,
                                        scratch_dir, "step6b_body")
         _render_panel(
@@ -434,11 +427,9 @@ def main():
     # Step 7 — lower-perimeter cut via visibility classifier + cut zone
     # =====================================================================
     keep6_idx = np.flatnonzero(~remove6b)
-    body6 = body2.submesh([keep6_idx], append=True)
+    body6 = body.submesh([keep6_idx], append=True)
     if isinstance(body6, list):
         body6 = body6[0]
-    verts_on_plane_6 = np.abs(body6.vertices[:, 1]) < PLANE_EPS
-    face_on_y0_6 = verts_on_plane_6[body6.faces].any(axis=1)
     meta["step7_input_faces"] = int(len(body6.faces))
 
     CUT_ZONE_FLOOR_FRAC = 0.15
@@ -446,11 +437,14 @@ def main():
     floor_z_max = (body6.bounds[0, 2]
                    + CUT_ZONE_FLOOR_FRAC
                    * (body6.bounds[1, 2] - body6.bounds[0, 2]))
-    outboard_y_limit = float(body6.bounds[0, 1])  # = body y_min = slab outboard edge
+    # Full car: outboard cuts extend to both ±y bounds.
+    outboard_y_limit = (float(body6.bounds[0, 1]),
+                        float(body6.bounds[1, 1]))
     print(f"\n[step7] cut zone: floor z<{floor_z_max:.4f} "
           f"({CUT_ZONE_FLOOR_FRAC:.0%} of body), wheel cyl "
           f"{CUT_ZONE_WHEEL_FAC}× r, inboard {CUT_ZONE_WHEEL_FAC}× ax, "
-          f"outboard end → y={outboard_y_limit:+.4f}")
+          f"outboard ends → y∈[{outboard_y_limit[0]:+.4f}, "
+          f"{outboard_y_limit[1]:+.4f}]")
     cut_zone = build_cut_zone(body6, wheels,
                               floor_z_max=floor_z_max,
                               wheel_radius_factor=CUT_ZONE_WHEEL_FAC,
@@ -482,9 +476,10 @@ def main():
         eps_rel=1e-5,
         prefilter=True,
         prefilter_z_band_frac=0.31,
-        prefilter_normal_z_max=-0.30,
+        prefilter_normal_z_max=args.prefilter_normal_z_max,
         cut_zone=cut_zone,
     )
+    meta["step7_prefilter_normal_z_max"] = args.prefilter_normal_z_max
 
     keep_idx = np.flatnonzero(labels == LABEL_KEEP)
     remove_idx = np.flatnonzero(labels == LABEL_REMOVE)
@@ -511,22 +506,14 @@ def main():
         meta["step7_boundary_edges"] = int(len(boundary_edges))
         print(f"  [debug] step7_keep_raw/remove/drop/boundary STLs")
 
-    # Final upper shell: KEEP-only + keep-largest (NO y=0 protect — we want
-    # one single connected component; tiny y=0-edge slivers from the
-    # lower-cut get dropped along with the rest of the debris).
+    # Final upper shell: KEEP-only + keep-largest. May still have small
+    # holes where steps 5-7 over-removed; step 8 (rim re-cut) plugs those.
     not_keep_mask = labels != LABEL_KEEP
     final_remove = keep_largest_component(body6, not_keep_mask)
     final_keep_idx = np.flatnonzero(~final_remove)
     final_mesh = body6.submesh([final_keep_idx], append=True)
     if isinstance(final_mesh, list):
         final_mesh = final_mesh[0]
-
-    # Steps 5-7 can leave "tooth" edges on the y=0 boundary (one
-    # endpoint exactly at y=0 from step 2, the other a few mm inboard
-    # from a later cut). Snap those tips back to y=0 so the final
-    # boundary is a clean planar loop — visible as a smooth edge in
-    # Blender, and downstream tools (integrate_underbody) can cap it.
-    final_mesh = clean_y0_boundary(final_mesh, verbose=True)
 
     final_path = output_dir / f"{basename}_final.stl"
     final_mesh.export(str(final_path), file_type="stl")
@@ -547,6 +534,51 @@ def main():
             view_bounds=final_mesh.bounds.copy(),
             scratch_dir=scratch_dir,
         )
+
+    # =====================================================================
+    # Step 8 — open-boundary components + re-cut via longest rim
+    # =====================================================================
+    # NOTE: `final_mesh` is built via submesh+process — its boundary edges
+    # already use deduplicated vertex indices, so connected-component
+    # walks see real adjacency. Components > loops here because the
+    # boundary graph has T-junctions (verts of degree ≥ 3 where two
+    # surface sheets meet at a single point); using components instead
+    # of single-path-walked loops is robust to those.
+    boundary_edges, components = find_open_boundary_components(final_mesh)
+    print(f"[boundaries] {len(boundary_edges):,} open edges, "
+          f"{len(components)} components")
+    boundaries_all_path = output_dir / f"{basename}_boundaries_all.stl"
+    n_all = export_edges_as_tubes(
+        final_mesh, boundary_edges, boundaries_all_path)
+    print(f"[boundaries] {boundaries_all_path}  "
+          f"({n_all:,} edges as tubes)")
+    meta["boundaries_all_path"] = str(boundaries_all_path)
+    meta["boundaries_all_edge_count"] = int(n_all)
+    meta["boundaries_component_count"] = len(components)
+
+    if components:
+        longest_verts, longest_edges, longest_peri = components[0]
+        boundaries_longest_path = (
+            output_dir / f"{basename}_boundaries_longest.stl")
+        n_long = export_edges_as_tubes(
+            final_mesh, longest_edges, boundaries_longest_path)
+        print(f"[boundaries] {boundaries_longest_path}  "
+              f"(longest component: {len(longest_verts)} verts, "
+              f"{n_long:,} edges, perimeter ≈ {longest_peri:.3f})")
+        meta["boundaries_longest_path"] = str(boundaries_longest_path)
+        meta["boundaries_longest_vertex_count"] = int(len(longest_verts))
+        meta["boundaries_longest_edge_count"] = int(len(longest_edges))
+        meta["boundaries_longest_perimeter"] = float(longest_peri)
+
+    recut_mesh, recut_info = recut_with_longest_rim(body, final_mesh)
+    recut_path = output_dir / f"{basename}_upper_recut.stl"
+    recut_mesh.export(str(recut_path), file_type="stl")
+    meta["recut_path"] = str(recut_path)
+    meta["recut_faces"] = int(len(recut_mesh.faces))
+    meta["recut_vertices"] = int(len(recut_mesh.vertices))
+    meta["recut_info"] = recut_info
+    print(f"[recut] {recut_path}  ({len(recut_mesh.faces):,} faces, "
+          f"{len(recut_mesh.vertices):,} verts)")
 
     meta_path = output_dir / f"{basename}_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2, default=float))

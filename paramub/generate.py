@@ -100,23 +100,23 @@ def _export_stl(asy: cq.Assembly, stl_path: Path, tolerance: float,
     )
 
 
-def _premesh_body(asy: cq.Assembly, linear_tol: float,
-                  body_angular_tol: float) -> None:
-    """Pre-mesh the 'body' child at a finer angular tolerance.
+def _premesh_underbody(asy: cq.Assembly, linear_tol: float,
+                        underbody_angular_tol: float) -> None:
+    """Pre-mesh the 'underbody' child at a finer angular tolerance.
 
     BRepMesh refuses to refine an existing mesh when a coarser tolerance is
     later requested, so the merged STL exporter (run at the global, coarser
-    angular tolerance) would otherwise lock in a coarse mesh for the body
-    too. Running the fine mesh first locks the finer one in before that
-    happens; the coarse export sees an already-meshed body and only meshes
-    the wheels.
+    angular tolerance) would otherwise lock in a coarse mesh for the
+    underbody too. Running the fine mesh first locks the finer one in
+    before that happens; the coarse export sees an already-meshed underbody
+    and only meshes the wheels.
     """
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     for child in asy.children:
-        if child.name == "body":
+        if child.name == "underbody":
             BRepMesh_IncrementalMesh(
                 child.obj.wrapped, linear_tol, False,
-                body_angular_tol, True)
+                underbody_angular_tol, True)
 
 
 def _export_step_assembly(asy: cq.Assembly, step_path: Path) -> None:
@@ -228,11 +228,11 @@ def _spawn_renderer(stl_path: Path, output_dir: Path,
 # Fixed mapping from assembly child name -> base filename (without extension)
 # for per-part exports. Extension is appended per format (.STL / .STEP).
 _PART_BASENAME = {
-    "body":     "FLOOR",
-    "wheel_fl": "WHEEL_FL",
-    "wheel_fr": "WHEEL_FR",
-    "wheel_rl": "WHEEL_RL",
-    "wheel_rr": "WHEEL_RR",
+    "underbody": "FLOOR",
+    "wheel_fl":  "WHEEL_FL",
+    "wheel_fr":  "WHEEL_FR",
+    "wheel_rl":  "WHEEL_RL",
+    "wheel_rr":  "WHEEL_RR",
 }
 
 
@@ -241,7 +241,7 @@ def _export_parts_stl(asy: cq.Assembly, output_dir: Path,
                        floor_angular_tolerance: float) -> dict[str, str]:
     """Write one STL per named child of ``asy`` with fixed UPPERCASE names.
 
-    The FLOOR (body) part uses ``floor_angular_tolerance`` so the
+    The FLOOR (underbody) part uses ``floor_angular_tolerance`` so the
     multisection-diffuser Bezier loft tessellates finely; all other
     parts (wheels) use the global ``angular_tolerance``.
     """
@@ -255,7 +255,7 @@ def _export_parts_stl(asy: cq.Assembly, output_dir: Path,
         sub = cq.Assembly()
         sub.add(child.obj, name=child.name)
         out_path = output_dir / f"{base}.STL"
-        part_ang = (floor_angular_tolerance if child.name == "body"
+        part_ang = (floor_angular_tolerance if child.name == "underbody"
                     else angular_tolerance)
         exporters.export(
             sub.toCompound(),
@@ -299,7 +299,6 @@ def generate(
     stl_tolerance_mm: float = DEFAULT_STL_TOLERANCE_MM,
     stl_angular_tolerance_rad: float = DEFAULT_STL_ANGULAR_TOLERANCE_RAD,
     floor_angular_tolerance_rad: float = DEFAULT_FLOOR_ANGULAR_TOLERANCE_RAD,
-    half_only: bool = False,
 ) -> dict:
     """Build the underbody and write outputs.
 
@@ -333,9 +332,6 @@ def generate(
         only. Finer than ``stl_angular_tolerance_rad`` so the
         multisection-diffuser Bezier loft tessellates smoothly without
         making the wheel parts pay the cost.
-    half_only:
-        If True, build and export only the left (y<0) half of the car —
-        2 wheels + half floor + half-arch geometry, sliced at y=0.
 
     Returns a record dict with paths + status.
     """
@@ -361,8 +357,8 @@ def generate(
     if output_mode == "stl":
         # Direct path; no log capture, no renderer.
         t0 = time.time()
-        asy, layout = build_underbody(spec, half_only=half_only)
-        _premesh_body(asy, stl_tolerance_mm, floor_angular_tolerance_rad)
+        asy, layout = build_underbody(spec)
+        _premesh_underbody(asy, stl_tolerance_mm, floor_angular_tolerance_rad)
         _export_stl(asy, stl_path, stl_tolerance_mm,
                     stl_angular_tolerance_rad)
         if output_parts:
@@ -407,12 +403,12 @@ def generate(
                 print(f"params dumped -> {json_path.name}")
 
                 t_build0 = time.time()
-                asy, layout = build_underbody(spec, half_only=half_only)
+                asy, layout = build_underbody(spec)
                 t_build = time.time() - t_build0
                 print(f"build  : {t_build:.1f}s")
 
                 t_export0 = time.time()
-                _premesh_body(asy, stl_tolerance_mm,
+                _premesh_underbody(asy, stl_tolerance_mm,
                               floor_angular_tolerance_rad)
                 _export_stl(asy, stl_path, stl_tolerance_mm,
                             stl_angular_tolerance_rad)

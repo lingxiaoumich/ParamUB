@@ -37,7 +37,7 @@ from .wheelhouse_builder import (
 
 @dataclass
 class UnderbodySpec:
-    """One spec covering wheels, floor, and body.
+    """One spec covering wheels, floor, and underbody.
 
     Vehicle plan
         wheelbase_mm, front_overhang_mm, rear_overhang_mm:
@@ -218,20 +218,17 @@ def _make_wheelhouse_specs(spec: UnderbodySpec, layout: dict,
     return out
 
 
-def build_underbody(spec: Optional[UnderbodySpec] = None,
-                     half_only: bool = False):
+def build_underbody(spec: Optional[UnderbodySpec] = None):
     """Top-level: build floor + wheelhouses + place wheels.
 
-    half_only=True: produce only the left (y<0) half of the car. Skips
-    the right-side wheels/wheelhouses entirely and slices the body at
-    y=0 so the floor and arches are cleanly cut at the centerline.
+    Always builds the full car (both sides).
 
     Returns (Assembly, layout dict).
     """
     spec = spec or UnderbodySpec()
     layout = _compute_layout(spec)
-    print(f"[layout] {layout}  half_only={half_only}")
-    sides = ("left",) if half_only else ("left", "right")
+    print(f"[layout] {layout}")
+    sides = ("left", "right")
 
     print(f"[wheels] building wheels via wheel_assem ... (sides={sides})")
     front_wheel = assemble_wheel(spec.wheel)
@@ -248,7 +245,7 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
     print(f"  front: OD={2*tire_radius_f:.1f} mm  width={tire_width_f}")
     print(f"  rear : OD={2*tire_radius_r:.1f} mm  width={tire_width_r}")
 
-    print("[body] building floor + wheelhouse surfaces ...")
+    print("[underbody] building floor + wheelhouse surfaces ...")
     floor_spec = FloorSpec(
         floor_x_min=layout["floor_x_min"],
         floor_x_max=layout["floor_x_max"],
@@ -278,26 +275,15 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
     wh_faces = []
     for s, solid in wh_solids:
         wh_faces.extend(extract_wheelhouse_surfaces(solid, s, below_cropper))
-    body = cq.Compound.makeCompound([floor, *wh_faces])
+    underbody = cq.Compound.makeCompound([floor, *wh_faces])
 
     if abs(spec.floor_angle_deg) > 1e-6:
         pivot_x = layout["floor_x_max"]
-        body = body.rotate(
+        underbody = underbody.rotate(
             (pivot_x, 0, spec.ride_height_mm),
             (pivot_x, 1, spec.ride_height_mm),
             -spec.floor_angle_deg,
         )
-
-    if half_only:
-        # Slice body at y=0: cut away everything with y > 0 so the result
-        # is a true left-half model (the floor builder always produces a
-        # full-width surface, and the wheelhouse cuts skipped above were
-        # only on the right side, so without this slice the body still
-        # spans both sides minus right-arch trim).
-        huge = 10000.0
-        y_pos_halfspace = (cq.Workplane("XY").box(huge, huge, huge)
-                           .translate((0, huge / 2.0, 0)).val())
-        body = _cut_face_with_solid(body, y_pos_halfspace)
 
     print(f"[wheels] placing {2 * len(sides)} corners ...")
     all_wheels = [
@@ -317,9 +303,9 @@ def build_underbody(spec: Optional[UnderbodySpec] = None,
         if side in sides
     ]
 
-    print("[assemble] body + 4 wheels ...")
+    print("[assemble] underbody + 4 wheels ...")
     asy = cq.Assembly()
-    asy.add(body, name="body", color=cq.Color(0.78, 0.80, 0.84))
+    asy.add(underbody, name="underbody", color=cq.Color(0.78, 0.80, 0.84))
     for name, w in wheels:
         asy.add(w, name=name, color=cq.Color(0.18, 0.18, 0.20))
 
