@@ -65,6 +65,7 @@ import trimesh
 from paramub.shell_extract import (
     LABEL_KEEP, LABEL_REMOVE, LABEL_DROP,
     build_cut_zone, build_cut_zone_volume_mesh,
+    clean_y0_boundary,
     edges_to_tube_mesh,
     keep_largest_component, split_keep_remove,
     s1_canonicalize, s2_keep_left,
@@ -519,6 +520,13 @@ def main():
     final_mesh = body6.submesh([final_keep_idx], append=True)
     if isinstance(final_mesh, list):
         final_mesh = final_mesh[0]
+
+    # Steps 5-7 can leave "tooth" edges on the y=0 boundary (one
+    # endpoint exactly at y=0 from step 2, the other a few mm inboard
+    # from a later cut). Snap those tips back to y=0 so the final
+    # boundary is a clean planar loop — visible as a smooth edge in
+    # Blender, and downstream tools (integrate_underbody) can cap it.
+    final_mesh = clean_y0_boundary(final_mesh, verbose=True)
 
     final_path = output_dir / f"{basename}_final.stl"
     final_mesh.export(str(final_path), file_type="stl")

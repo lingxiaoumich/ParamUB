@@ -601,6 +601,141 @@ def keep_left_half(mesh: trimesh.Trimesh, cap: bool = False) -> trimesh.Trimesh:
     return cut
 
 
+def cap_open_boundary_at_y0(mesh: trimesh.Trimesh,
+                              y_tol: float = 1e-3,
+                              hull_ratio: float = 0.05) -> trimesh.Trimesh:
+    """Triangulate a flat cap on the y=0 plane.
+
+    Expects the input mesh to have a clean planar boundary at y=0 — i.e.
+    the open boundary edges along the symmetry plane have BOTH endpoints
+    exactly (within ``y_tol``) at y=0. ``run_shell.py``'s
+    ``clean_y0_boundary`` produces such a mesh.
+
+    Strategy:
+      0. Process the input mesh (merge coincident vertices). Without
+         this, an unprocessed STL with duplicate verts gives many tiny
+         "components" instead of the one main silhouette loop.
+      1. Identify open boundary edges whose both endpoints satisfy
+         ``|y| < y_tol``.
+      2. Group those edges into connected components.
+      3. For each component, compute the concave hull of its xz points
+         (gets an ORDERED boundary polygon even when the underlying
+         open-edge graph has junctions or branches that would defeat a
+         naïve walk).
+      4. Triangulate the hull polygon via mapbox_earcut, creating new
+         3D cap vertices at y=0.
+      5. Append cap vertices + faces to the mesh.
+
+    Caps multiple disjoint loops independently. The cap polygon uses
+    its own new vertices (not the mesh's existing y=0 vertices), so
+    junctions in the original open-edge graph don't matter — only the
+    perimeter of the component's xz footprint does.
+    """
+    import mapbox_earcut
+    from collections import defaultdict
+    from shapely.geometry import MultiPoint
+
+    # Step 0: dedupe vertices so connected-components logic doesn't see
+    # the main silhouette as many tiny disjoint fragments.
+    mesh = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices, dtype=np.float64),
+        faces=np.asarray(mesh.faces, dtype=np.int64),
+        process=True)
+
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    at_y0 = np.abs(verts[:, 1]) < y_tol
+
+    sh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    edges = sh.edges_sorted
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    open_pairs = unique[counts == 1]
+    if len(open_pairs) == 0:
+        print("[cap-y0] no open boundary edges; nothing to cap.")
+        return mesh
+
+    on_y0 = at_y0[open_pairs[:, 0]] & at_y0[open_pairs[:, 1]]
+    cut_edges = open_pairs[on_y0]
+    if len(cut_edges) < 3:
+        print(f"[cap-y0] only {len(cut_edges)} open edges on y=0; no cap.")
+        return mesh
+
+    adj: dict[int, set[int]] = defaultdict(set)
+    for i, j in cut_edges:
+        adj[int(i)].add(int(j))
+        adj[int(j)].add(int(i))
+
+    visited: set[int] = set()
+    components: list[list[int]] = []
+    for start in list(adj.keys()):
+        if start in visited:
+            continue
+        comp: list[int] = []
+        stack = [start]
+        while stack:
+            n = stack.pop()
+            if n in visited:
+                continue
+            visited.add(n)
+            comp.append(n)
+            stack.extend(adj[n] - visited)
+        if len(comp) >= 3:
+            components.append(comp)
+
+    new_verts_blocks: list[np.ndarray] = []
+    new_faces = list(faces)
+    n_added = 0
+    capped_loops = 0
+    skipped_loops = 0
+    for comp in components:
+        pts_xz = verts[comp][:, [0, 2]]
+        try:
+            hull = MultiPoint(pts_xz).concave_hull(ratio=hull_ratio)
+        except AttributeError:
+            hull = MultiPoint(pts_xz).convex_hull
+        if hull.is_empty or hull.geom_type != "Polygon":
+            skipped_loops += 1
+            continue
+        coords = np.asarray(hull.exterior.coords, dtype=np.float64)
+        if len(coords) >= 2 and np.allclose(coords[0], coords[-1]):
+            coords = coords[:-1]
+        if len(coords) < 3:
+            skipped_loops += 1
+            continue
+        n = len(coords)
+        new_v = np.column_stack(
+            [coords[:, 0], np.zeros(n), coords[:, 1]])
+        offset = len(verts) + sum(len(v) for v in new_verts_blocks)
+        rings = np.asarray([n], dtype=np.uint32)
+        try:
+            tri = mapbox_earcut.triangulate_float64(coords, rings)
+        except Exception:
+            skipped_loops += 1
+            continue
+        if len(tri) == 0:
+            skipped_loops += 1
+            continue
+        new_verts_blocks.append(new_v)
+        for t in range(0, len(tri), 3):
+            new_faces.append([offset + int(tri[t]),
+                              offset + int(tri[t + 1]),
+                              offset + int(tri[t + 2])])
+            n_added += 1
+        capped_loops += 1
+
+    all_verts = (np.vstack([verts, *new_verts_blocks])
+                 if new_verts_blocks else verts)
+    print(f"[cap-y0] verts at y=0: {int(at_y0.sum()):,}  "
+          f"open-on-y0 edges: {len(cut_edges):,}  "
+          f"components: {len(components)}  "
+          f"loops capped: {capped_loops}, skipped: {skipped_loops}  "
+          f"cap triangles added: {n_added}")
+    return trimesh.Trimesh(
+        vertices=all_verts,
+        faces=np.array(new_faces, dtype=np.int64),
+        process=False)
+
+
 def cq_obj_to_trimesh_via_stl(cq_obj, stl_tmp: Path,
                                tolerance: float = 0.1,
                                angular_tolerance: float = 0.1
@@ -1263,8 +1398,14 @@ def main():
               f"y range=({w_aligned.bounds[0,1]:.1f}, "
               f"{w_aligned.bounds[1,1]:.1f})")
 
-    # ---- shell: slice at y=0 with cap so combined body is closed ------
-    shell_left = keep_left_half(shell_mm, cap=True)
+    # ---- shell: keep left half and cap at y=0 -------------------------
+    # The shell was already pre-cut at y=0 by run_shell.py, so
+    # slice_mesh_plane has nothing to slice — the boundary is there but
+    # never closed (visible as a jagged edge in Blender). cap_open_
+    # boundary_at_y0 finds those near-y=0 open edges, snaps them flat,
+    # and triangulates a custom cap.
+    shell_left = keep_left_half(shell_mm, cap=False)   # drop any y>0
+    shell_left = cap_open_boundary_at_y0(shell_left, y_tol=1e-3)
     print(f"[shell left+cap] faces={len(shell_left.faces):,}  "
           f"y range=({shell_left.bounds[0,1]:.1f}, {shell_left.bounds[1,1]:.1f})")
 

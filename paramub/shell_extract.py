@@ -231,6 +231,58 @@ def s1_canonicalize(in_path: Path | str,
 # Step 2: clean planar cut at y = 0
 # ===========================================================================
 
+def clean_y0_boundary(mesh: trimesh.Trimesh,
+                       verbose: bool = True) -> trimesh.Trimesh:
+    """Snap "tooth-tip" vertices to exactly y=0.
+
+    Step 2 (``s2_keep_left``) gives a clean planar cut, but the later
+    cylinder / wheelhouse / visibility steps re-cut the mesh and can
+    produce open boundary edges where ONE endpoint sits exactly at y=0
+    (a survivor from step 2) and the OTHER drifts a few millimetres
+    inboard. The resulting boundary looks jagged in 3D viewers and
+    prevents downstream tools (e.g. integrate_underbody's y=0 cap) from
+    finding a single clean polygon to triangulate.
+
+    Strategy:
+      1. Collect open boundary edges (edges in exactly one face).
+      2. Pick "tooth" edges: exactly one endpoint at y=0 (within 1e-9).
+      3. Snap the off-axis endpoint to y=0.
+      4. Re-build the mesh with ``process=True`` so any zero-area face
+         that resulted from a tip and base coinciding is cleaned out.
+
+    Call right before the final STL export.
+    """
+    v = np.asarray(mesh.vertices, dtype=np.float64).copy()
+    edges = mesh.edges_sorted
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_pairs = unique[counts == 1]
+    y_at_0 = np.abs(v[:, 1]) < 1e-9
+    mixed = (y_at_0[boundary_pairs[:, 0]] ^ y_at_0[boundary_pairs[:, 1]])
+    teeth = boundary_pairs[mixed]
+    if len(teeth) == 0:
+        if verbose:
+            print("[y0-clean] no tooth edges at y=0; nothing to do")
+        return mesh
+    off_axis = np.where(
+        y_at_0[teeth[:, 0]], teeth[:, 1], teeth[:, 0])
+    off_axis = np.unique(off_axis)
+    if verbose:
+        off_y = np.abs(v[off_axis, 1])
+        print(f"[y0-clean] {len(teeth):,} tooth edges, {len(off_axis):,} "
+              f"unique off-axis tips (|y| mean={off_y.mean():.5f}, "
+              f"max={off_y.max():.5f}); snapping to y=0")
+    v[off_axis, 1] = 0.0
+    cleaned = trimesh.Trimesh(
+        vertices=v, faces=np.asarray(mesh.faces, dtype=np.int64),
+        process=True)
+    if verbose:
+        new_at_0 = int(np.sum(np.abs(cleaned.vertices[:, 1]) < 1e-9))
+        print(f"[y0-clean] verts at y=0: {int(np.sum(y_at_0)):,} → "
+              f"{new_at_0:,}; faces: {len(mesh.faces):,} → "
+              f"{len(cleaned.faces):,}")
+    return cleaned
+
+
 def s2_keep_left(mesh: trimesh.Trimesh,
                  verbose: bool = True
                  ) -> trimesh.Trimesh:
