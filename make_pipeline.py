@@ -8,21 +8,27 @@ sections, floor z) together with the geometric outputs of the final
 watertight result (per-part dimensions, triangle counts, watertight
 flags, volumes).
 
+Per-car output layout (default):
+
+    outputs/<base>/
+    ├── shell/                  stage 1 outputs
+    ├── integrate/              stages 2-4 outputs (shell, UB, wheels,
+    │                           gap, combined, fixed, clean,
+    │                           wheel_<corner>_clean STLs + JSONs)
+    │   └── <base>_summary.json consolidated geometry + verify report
+    └── logs/                   one master log + one per-stage log
+
 Pipeline (each stage runs as a subprocess so stdout can be tee'd into
 the master log without leaking Python state between stages):
 
-    1. run_shell.py             outputs/shell/<base>_*
-    2. integrate_underbody.py   outputs/integrate/<base>_*
-    3. fill_gap.py              outputs/integrate/<base>_{gap, combined}.stl
-    4. make_watertight.py       outputs/integrate/<base>_{clean, wheel_*_clean}.{stl,json}
+    1. run_shell.py             → outputs/<base>/shell/<base>_*
+    2. integrate_underbody.py   → outputs/<base>/integrate/<base>_*
+    3. fill_gap.py              → outputs/<base>/integrate/<base>_{gap, combined}.stl
+    4. make_watertight.py       → outputs/<base>/integrate/<base>_{clean, wheel_*_clean}.{stl,json}
 
 After stage 4:
     paramub.pipeline.summary.write_pipeline_summary
-        → outputs/integrate/<base>_summary.json
-
-Logs:
-    logs/<base>_pipeline.log         master log (all 4 stages, tee'd)
-    logs/<base>_stage_<n>_*.log      per-stage log (also written)
+        → outputs/<base>/integrate/<base>_summary.json
 
 Usage::
 
@@ -106,11 +112,20 @@ def main():
                                 "alfa_romeo_giuliazhuliye_2025_image10"
                                 "_71415_shadowfill.stl"),
                    help="Raw whole-car STL input. Default: alfa example.")
-    p.add_argument("--shell-dir", type=Path,
-                   default=Path("outputs/shell"))
-    p.add_argument("--integrate-dir", type=Path,
-                   default=Path("outputs/integrate"))
-    p.add_argument("--logs-dir", type=Path, default=Path("logs"))
+    p.add_argument("--outputs-root", type=Path,
+                   default=Path("outputs"),
+                   help="Root directory under which a per-car bundle "
+                        "<outputs-root>/<base>/{shell, integrate, logs}/ "
+                        "is created. Default: outputs.")
+    p.add_argument("--shell-dir", type=Path, default=None,
+                   help="Override stage-1 output dir. Defaults to "
+                        "<outputs-root>/<base>/shell.")
+    p.add_argument("--integrate-dir", type=Path, default=None,
+                   help="Override stages 2-4 output dir. Defaults to "
+                        "<outputs-root>/<base>/integrate.")
+    p.add_argument("--logs-dir", type=Path, default=None,
+                   help="Override logs dir. Defaults to "
+                        "<outputs-root>/<base>/logs.")
     p.add_argument("--skip-shell", action="store_true",
                    help="Skip stage 1 (assumes outputs/shell already populated).")
     p.add_argument("--skip-integrate", action="store_true",
@@ -135,10 +150,18 @@ def main():
     args = p.parse_args()
 
     base = args.input.stem
-    logs_dir = args.logs_dir
+    # Per-car bundle: outputs/<base>/{shell, integrate, logs}/ by
+    # default. Each can be overridden individually.
+    bundle = args.outputs_root / base
+    shell_dir = args.shell_dir if args.shell_dir is not None else bundle / "shell"
+    integrate_dir = args.integrate_dir if args.integrate_dir is not None else bundle / "integrate"
+    logs_dir = args.logs_dir if args.logs_dir is not None else bundle / "logs"
+    args.shell_dir = shell_dir
+    args.integrate_dir = integrate_dir
+    args.logs_dir = logs_dir
+    shell_dir.mkdir(parents=True, exist_ok=True)
+    integrate_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
-    args.shell_dir.mkdir(parents=True, exist_ok=True)
-    args.integrate_dir.mkdir(parents=True, exist_ok=True)
     master_log_path = logs_dir / f"{base}_pipeline.log"
 
     print(f"[pipeline] base={base}")

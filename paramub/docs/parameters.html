@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Parameter Provenance</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Reference</div>
+  <h1>Parameter provenance — detected vs default vs user-specified</h1>
+  <p class="subtitle">
+    For each parameter that drives the parametric underbody (stage 2),
+    where does its value come from? This page is the reference when you
+    expand the pipeline to a new car and want to know which knobs are
+    learned from input geometry, which are hard-coded defaults you
+    might want to tune, and which the CLI already lets you override.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#overview">Overview — the four provenance categories</a></li>
+    <li><a href="#hints">1. Geometry hints (detected from shell mesh)</a></li>
+    <li><a href="#tire-spoke">2. Tire + spoke (detected with heuristics)</a></li>
+    <li><a href="#splitter-diffuser">3. Splitter / diffuser sections (anchored to shell)</a></li>
+    <li><a href="#hardcoded">4. Hard-coded constants in integrate_underbody.py</a></li>
+    <li><a href="#cli">5. CLI / runtime overrides</a></li>
+    <li><a href="#extending">Extending to other cars — recommended knobs</a></li>
+  </ul>
+</nav>
+
+<h2 id="overview">Overview — the four provenance categories</h2>
+<table>
+  <thead>
+    <tr><th>Provenance</th><th>Source</th><th>How to tune</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>Detected</strong></td>
+        <td>Computed from the input shell mesh + stage-1 meta JSON in
+            <code>integrate_underbody.extract_hints()</code>.</td>
+        <td>Change the input. If the detection is wrong on a new car,
+            fix <code>extract_hints()</code> (heuristics live there).</td></tr>
+    <tr><td><strong>Heuristic</strong></td>
+        <td>Computed inside <code>integrate_underbody.build_spec()</code>
+            as a function of detected hints (e.g. crown_radius =
+            f(tire_width, tire_OD)).</td>
+        <td>Tweak the formula in
+            <code>integrate_underbody.build_spec()</code>.</td></tr>
+    <tr><td><strong>Hard-coded</strong></td>
+        <td>A literal in <code>integrate_underbody.build_spec()</code>
+            that overrides the dataclass default
+            (e.g. <code>wheel_house_axial_clearance_mm=20.0</code>).</td>
+        <td>Edit the literal in
+            <code>integrate_underbody.build_spec()</code>; or expose
+            it as a CLI flag.</td></tr>
+    <tr><td><strong>Default</strong></td>
+        <td>Falls through to the dataclass default in
+            <code>paramub/builders/{ub_assem, floor, wheelhouse,
+            wheel, spoke, tire}.py</code>.</td>
+        <td>Edit the dataclass default, or override in
+            <code>integrate_underbody.build_spec()</code>.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="hints">1. Geometry hints (detected from shell mesh)</h2>
+<p>
+  Computed by <code>integrate_underbody.extract_hints(shell_mesh, meta,
+  scale)</code> and stored in
+  <code>&lt;base&gt;_integrate_meta.json</code> under the <code>"hints"</code>
+  key. They are derived from the shell vertices + the per-wheel
+  fits (centre / radius / axial half) that stage 1's
+  <code>shell.extract</code> wrote to <code>&lt;base&gt;_meta.json</code>.
+</p>
+<table>
+  <thead>
+    <tr><th>Hint</th><th class="num">Example<br>(alfa)</th><th>How it's measured</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>scale</code></td><td class="num">3884</td>
+        <td><code>TARGET_WHEELBASE_MM / wheelbase_shell_units</code> —
+            scales the shell from input units (typically Hunyuan3D
+            normalized) to mm such that the wheelbase becomes 2700 mm.</td></tr>
+    <tr><td><code>wheelbase_mm</code></td><td class="num">2700</td>
+        <td><code>|rear_x − front_x|</code> from the per-wheel hub fits
+            in <code>meta["wheels_3d"]</code>.</td></tr>
+    <tr><td><code>front_overhang_mm</code> /
+            <code>rear_overhang_mm</code></td>
+        <td class="num">833 / 1020</td>
+        <td>Distance from front/rear axle to body bbox X-extent.</td></tr>
+    <tr><td><code>track_mm</code></td><td class="num">1524</td>
+        <td><code>2 × mean(|y|)</code> across all wheel centres
+            (full-car has 4 mirrored wheels).</td></tr>
+    <tr><td><code>tire_od_mm</code></td><td class="num">644</td>
+        <td><code>2 × mean(wheel radius)</code> from the per-wheel
+            circle fit.</td></tr>
+    <tr><td><code>tire_width_mm</code></td><td class="num">247</td>
+        <td><code>2 × mean(axial_half)</code> from the per-wheel Y-slab
+            fit.</td></tr>
+    <tr><td><code>hub_z_mm</code></td><td class="num">321</td>
+        <td><code>mean(wheel z)</code> across all 4 wheels.</td></tr>
+    <tr><td><code>ride_height_mm</code></td><td class="num">137</td>
+        <td>Min z of body face centroids EXCLUDING the bands around
+            each wheel (radius × 1.2 in x, axial × 1.5 in y).</td></tr>
+    <tr><td><code>floor_width_mm</code></td><td class="num">1783</td>
+        <td><code>2 × max(|y|)</code> on face centroids in the bottom
+            25 % of the body z range (the rocker-line band).</td></tr>
+    <tr><td><code>body_bounds_mm</code></td>
+        <td class="num">[…]</td>
+        <td>Full shell vertex bbox <code>[[x_min, y_min, z_min],
+            [x_max, y_max, z_max]]</code>.</td></tr>
+    <tr><td><code>midpoint_x_shell_mm</code></td>
+        <td class="num">−93</td>
+        <td>Mean of front and rear axle x. Used as the alignment
+            anchor when the parametric UB (x = 0 at wheel midpoint)
+            is transformed into the shell frame.</td></tr>
+    <tr><td><code>wheelhouse_top_mm</code>
+        <code>{front, rear}</code></td>
+        <td class="num">959 / 1383</td>
+        <td>Max z of shell face centroids inside a cylinder of
+            radius <code>1.5 × wheel radius</code> around each wheel
+            hub. Used as the wheelhouse-arch top hint.</td></tr>
+    <tr><td><code>rear_edge_min_z_mm</code></td><td class="num">295</td>
+        <td>Min z of shell vertices within
+            <code>REAR_EDGE_BAND_MM = 50</code> of the very rear.
+            The diffuser rear edge anchors to this.</td></tr>
+    <tr><td><code>wheel_outboard_y_mm</code>
+        <code>{front, rear}</code></td>
+        <td class="num">894 / 893</td>
+        <td>Max <code>|y|</code> of low-z shell vertices in a band
+            around each wheel x. Used to size the parametric
+            wheelhouse so its outboard edge reaches the rocker line.</td></tr>
+    <tr><td><code>front_wheel_y_mm</code> /
+            <code>rear_wheel_y_mm</code></td>
+        <td class="num">763 / 761</td>
+        <td>Mean <code>|y|</code> of front/rear wheel pair centres.
+            Used as the Y anchor for the splitter/diffuser
+            multisection lofts.</td></tr>
+    <tr><td><code>front_x_shell_mm</code> /
+            <code>rear_x_shell_mm</code></td>
+        <td class="num">−1443 / 1257</td>
+        <td>Per-axle absolute X in the shell frame.</td></tr>
+  </tbody>
+</table>
+
+<h3>Shell anchors (per Y target)</h3>
+<p>
+  In addition to the hints above, integrate_underbody probes the shell
+  at three Y targets — 0, front_wheel_y, and rear_wheel_y — for the
+  lowest-z shell vertex in a 200 mm-deep band at the front and rear
+  ends. The resulting <code>front_z_shell</code> / <code>rear_z_shell</code>
+  numbers anchor the splitter/diffuser Z heights at each section.
+  Stored in <code>integrate_meta.json["shell_anchors"]</code>.
+</p>
+
+<h2 id="tire-spoke">2. Tire + spoke (detected with heuristics)</h2>
+<p>
+  Built in <code>integrate_underbody.build_wheel_spec()</code> from
+  the detected <code>tire_od_mm</code> + <code>tire_width_mm</code>.
+  Most fields are heuristic formulas of those two; the rest are
+  hard-coded for now.
+</p>
+<table>
+  <thead>
+    <tr><th>Field</th><th>Provenance</th><th>Formula / value</th></tr>
+  </thead>
+  <tbody>
+    <tr><td colspan="3"><strong>TireSpec</strong></td></tr>
+    <tr><td><code>section_width_mm</code></td>
+        <td>Heuristic</td>
+        <td>round to nearest 5 mm of <code>tire_width</code>.</td></tr>
+    <tr><td><code>aspect_ratio</code></td>
+        <td>Heuristic</td>
+        <td>round to nearest 5 of <code>(tire_OD − rim_diameter) / 2
+            / section_width × 100</code>.</td></tr>
+    <tr><td><code>rim_diameter_in</code></td>
+        <td>Heuristic</td>
+        <td>round to nearest 1 in of
+            <code>0.6 × tire_OD / 25.4</code>.</td></tr>
+    <tr><td><code>tread_width_mm</code></td>
+        <td>Heuristic</td>
+        <td><code>max(60, 0.85 × tire_width)</code>.</td></tr>
+    <tr><td><code>crown_radius_mm</code></td>
+        <td>Heuristic</td>
+        <td><code>max(0.85 × tire_width / 2 + 50, 0.6 × tire_OD)</code>.</td></tr>
+    <tr><td><code>sidewall_bulge_mm</code></td>
+        <td>Hard-coded</td><td><code>6.0</code></td></tr>
+    <tr><td><code>shoulder_radius_mm</code></td>
+        <td>Hard-coded</td><td><code>20.0</code></td></tr>
+    <tr><td><code>rim_flange_mm</code></td>
+        <td>Hard-coded</td><td><code>14.0</code></td></tr>
+    <tr><td colspan="3"><strong>SpokeSpec</strong></td></tr>
+    <tr><td><code>wheel_width_mm</code></td>
+        <td>Heuristic</td>
+        <td><code>= tire_width</code> (full axial width).</td></tr>
+    <tr><td><code>hub_bore_mm</code></td>
+        <td>Default</td><td>SpokeSpec dataclass default</td></tr>
+    <tr><td><code>wheel_offset_mm</code> (ET)</td>
+        <td>Default</td><td>SpokeSpec dataclass default</td></tr>
+    <tr><td><code>num_spokes</code> +
+            spoke widths, gaps, rim_band_width,
+            spoke_thickness, etc.</td>
+        <td>Default</td>
+        <td>All from <code>SpokeSpec</code> dataclass defaults
+            (typically 5-spoke; the visible wheel design isn't
+            currently learned from the shell since the shell
+            extraction removed the original wheels).</td></tr>
+  </tbody>
+</table>
+
+<h2 id="splitter-diffuser">3. Splitter / diffuser sections (anchored to shell)</h2>
+<p>
+  Three sections each, at <code>y = 0</code>, <code>y = front_wheel_y</code>,
+  and <code>y = body_half × 0.95</code>. Built in
+  <code>integrate_underbody.build_splitter_sections()</code> and
+  <code>build_diffuser_sections()</code>. Each section has 4 detected
+  endpoints (x and z, at front + rear) and 3 hard-coded knobs (kick
+  x, edge angle, Bezier handle strengths).
+</p>
+<table>
+  <thead>
+    <tr><th>Field</th><th>Provenance</th><th>Value</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>y_mm</code></td><td>Detected</td>
+        <td>0, <code>front_wheel_y</code>, <code>0.95 × body_half</code></td></tr>
+    <tr><td>Splitter <code>front_x_mm</code>
+        / <code>front_z_mm</code></td>
+        <td>Detected</td>
+        <td>Front-end shell anchor at this Y (<code>shell_anchors[y]
+            .front_x_shell</code> / <code>.front_z_shell</code>).</td></tr>
+    <tr><td>Diffuser <code>rear_x_mm</code> /
+            <code>rear_z_mm</code></td>
+        <td>Detected</td>
+        <td>Rear-end shell anchor at this Y.</td></tr>
+    <tr><td><code>kick_x_mm</code> (splitter / diffuser)</td>
+        <td>Hard-coded</td>
+        <td>splitter: <code>+1450 mm</code>;
+            diffuser: <code>−1400 mm</code>
+            (where the flat-floor floor transitions into the angled
+            splitter / diffuser).</td></tr>
+    <tr><td><code>front_angle_deg</code> / <code>rear_angle_deg</code></td>
+        <td>Hard-coded</td>
+        <td>splitter <code>5°</code>; diffuser <code>5°</code></td></tr>
+    <tr><td><code>start_strength</code> / <code>end_strength</code></td>
+        <td>Hard-coded</td>
+        <td><code>0.30</code> for both pieces (Bezier handle length
+            as a fraction of the chord).</td></tr>
+  </tbody>
+</table>
+
+<h2 id="hardcoded">4. Hard-coded constants in <code>integrate_underbody.py</code></h2>
+<table>
+  <thead>
+    <tr><th>UnderbodySpec field</th><th class="num">Hard-coded value</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>floor_angle_deg</code></td><td class="num">0.0</td>
+        <td>Rake about the front edge. Not learned from the shell.</td></tr>
+    <tr><td><code>wheel_house_axial_clearance_mm</code></td>
+        <td class="num">20.0</td>
+        <td>Radial gap tire OD → arch ID.</td></tr>
+    <tr><td><code>wheel_house_lateral_clearance_mm</code></td>
+        <td class="num">25.0</td>
+        <td>Base Y clearance per side.</td></tr>
+    <tr><td><code>front_steering_clearance_mm</code></td>
+        <td class="num">0.0</td>
+        <td>Extra Y on front arches for steering travel.</td></tr>
+    <tr><td><code>rear_steering_clearance_mm</code></td>
+        <td class="num">0.0</td>
+        <td>Extra Y on rear arches.</td></tr>
+    <tr><td><code>front_wheel_house_fillet_mm</code></td>
+        <td class="num">100.0 (dataclass default)</td>
+        <td>Not overridden in build_spec(); uses dataclass default.</td></tr>
+    <tr><td><code>rear_wheel_house_fillet_mm</code></td>
+        <td class="num">100.0 (dataclass default)</td><td>same</td></tr>
+    <tr><td><code>camber_front_deg</code> /
+            <code>camber_rear_deg</code></td>
+        <td class="num">0.0 / 0.0</td><td></td></tr>
+    <tr><td><code>toe_front_deg</code> /
+            <code>toe_rear_deg</code></td>
+        <td class="num">0.0 / 0.0</td><td></td></tr>
+    <tr><td><code>lateral_clearance_overrides_mm</code></td>
+        <td class="num">per-wheel from <code>wheel_outboard_y_mm − track/2</code></td>
+        <td>Detected per-corner extra Y so the parametric arch
+            reaches the shell's rocker line.</td></tr>
+    <tr><td>Floor / overhang constants</td>
+        <td class="num">various</td>
+        <td>e.g. <code>REAR_EDGE_BAND_MM = 50</code> (band depth for
+            <code>rear_edge_min_z_mm</code>),
+            <code>TARGET_WHEELBASE_MM = 2700</code> (the scale
+            normaliser). See module-top constants.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="cli">5. CLI / runtime overrides</h2>
+<p>
+  Currently the user-facing CLI surface is small — the whole
+  <code>UnderbodySpec</code> is auto-derived. Existing flags:
+</p>
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Driver</th><th>Effect</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>--input</code> / <code>--output-dir</code></td>
+        <td>all 4 stages</td>
+        <td>File paths.</td></tr>
+    <tr><td><code>--shell-meta</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>Path to stage-1 meta JSON (default: alfa example).</td></tr>
+    <tr><td><code>--no-trim</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>Skip the BREP-cut trim of the parametric UB to the shell rim.</td></tr>
+    <tr><td><code>--no-remesh</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>Skip the post-trim isotropic remesh.</td></tr>
+    <tr><td><code>--cut-shrink-mm</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>Shrink the cut polygon by this many mm before trimming
+            (default 100). Larger = more UB stays inside the rim.</td></tr>
+    <tr><td><code>--depth</code> /
+            <code>--max-nm-passes</code> /
+            <code>--no-symmetrize</code> /
+            <code>--wt-mode</code> /
+            <code>--include-wheels</code> / <code>--no-wheels</code></td>
+        <td><code>make_watertight.py</code> /
+            <code>make_pipeline.py</code></td>
+        <td>Stage-4 tuning (see <a href="watertight.html">watertight
+            guide</a>).</td></tr>
+    <tr><td><code>--repair</code> +
+            <code>--repair-close-holes-max</code> /
+            <code>--repair-remesh-mm</code> /
+            <code>--repair-remesh-iters</code></td>
+        <td><code>fill_gap.py</code></td>
+        <td>Stage-3 close_holes + isotropic remesh on the combined
+            mesh.</td></tr>
+  </tbody>
+</table>
+
+<p>
+  None of the UnderbodySpec fields above (clearances, fillets,
+  alignment, splitter/diffuser angles, …) currently has a CLI flag —
+  they're hard-coded in <code>integrate_underbody.build_spec()</code>.
+  If your new car needs a different value, edit that function (one
+  literal per field, all in one place between lines 481-501).
+</p>
+
+<h2 id="extending">Extending to other cars — recommended knobs</h2>
+<p>
+  Most parameters are detected from geometry, so a new car typically
+  needs <strong>zero changes</strong> to the spec construction code.
+  The pipeline should produce a sensible parametric UB on any input
+  the shell extractor can handle. Things that may need attention:
+</p>
+<ol>
+  <li><strong>Scale normalisation.</strong>
+    <code>TARGET_WHEELBASE_MM = 2700</code> is the assumed real-world
+    wheelbase used to derive the shell-to-mm scale. If your input STL
+    is already in mm at real size, the scale will come out as 1.0 and
+    everything's fine. If the input is in normalized units (e.g.
+    Hunyuan3D output), the scale assumes the car is a 2.7 m wheelbase
+    sedan. For very different wheelbases (super-cars, vans), you may
+    want to set <code>TARGET_WHEELBASE_MM</code> per car or skip the
+    rescale.</li>
+  <li><strong>Wheelhouse clearances.</strong>
+    The hard-coded
+    <code>axial_clearance_mm = 20</code> and
+    <code>lateral_clearance_mm = 25</code> work for typical passenger
+    cars. SUVs / off-road may want more axial; track cars may want
+    less. Exposing as CLI flags is easy (one-line argparse + thread
+    through <code>build_spec()</code>).</li>
+  <li><strong>Splitter / diffuser angles.</strong>
+    Hard-coded at 5° front and 5° rear. Performance cars may want
+    steeper diffusers (8-15°). The Bezier handle strengths
+    (<code>start_strength = end_strength = 0.30</code>) also affect
+    the curve shape — softer (0.2) or sharper (0.5) reshape the
+    transition without changing endpoints.</li>
+  <li><strong>Wheel design.</strong>
+    The visible wheel spokes / hub bore / offset are pure
+    <code>SpokeSpec</code> defaults (the shell extractor removed the
+    real wheels, so we have no detection signal). If you want the
+    rendered wheel to match the source car, override
+    <code>spoke =</code> in <code>build_wheel_spec()</code>.</li>
+  <li><strong>Multi-axle / non-symmetric vehicles.</strong>
+    The detection assumes <code>track_front = track_rear</code>. Cars
+    with very different tracks (some sports cars, some EVs) would
+    want per-axle detection. The hooks are already there — change
+    <code>track_front_mm</code> and <code>track_rear_mm</code> in
+    <code>build_spec()</code> to use per-axle hints.</li>
+</ol>
+
+<footer>ParamUB — see <code>integrate_underbody.py</code> + the
+spec dataclasses under <code>paramub/builders/</code> for source.</footer>
+</main>
+</body>
+</html>
