@@ -20,15 +20,15 @@ from typing import Optional
 
 import cadquery as cq
 
-from .floor_builder import (
+from .floor import (
     DiffuserSection,
     FloorSpec,
     SplitterSection,
     build_below_cropper,
     build_floor,
 )
-from .wheel_assem import WheelSpec, assemble_wheel
-from .wheelhouse_builder import (
+from .wheel import WheelSpec, assemble_wheel
+from .wheelhouse import (
     WheelhouseSpec,
     build_wheelhouse_solid,
     extract_wheelhouse_surfaces,

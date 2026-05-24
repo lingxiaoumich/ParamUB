@@ -38,7 +38,7 @@ Shell canonical frame (set in :mod:`paramub.shell_extract`):
     input STL was in (typically meters at Hunyuan3D normalized scale,
     e.g. ~1.2 m long).
 
-ParamUB underbody frame (set in :mod:`paramub.ub_assem`):
+ParamUB underbody frame (set in :mod:`paramub.builders.ub_assem`):
     +x = forward, +y = right, +z = up, mm units, body centered on x=0
     (front axle at +wheelbase/2).
 
@@ -579,7 +579,7 @@ def build_shell_cut_polygon(shell_mm: trimesh.Trimesh,
     """
     import shapely
     from shapely.geometry import MultiPoint, Polygon
-    from paramub.shell_recut import find_open_boundary_components
+    from paramub.shell.recut import find_open_boundary_components
 
     # final_path was loaded with process=False so its boundary graph is
     # noise (every face has its own vertices). Re-process for dedup.
@@ -889,7 +889,7 @@ def main():
                   f"{s.rear_z_mm:>6.1f})")
 
     print("\n[paramub] build_underbody (full car) ...")
-    from paramub.ub_assem import build_underbody
+    from paramub.builders.ub_assem import build_underbody
     asy, layout = build_underbody(spec)
     print(f"[paramub] layout = {layout}")
 

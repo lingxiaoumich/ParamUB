@@ -17,7 +17,7 @@ the master log without leaking Python state between stages):
     4. make_watertight.py       outputs/integrate/<base>_{clean, wheel_*_clean}.{stl,json}
 
 After stage 4:
-    paramub.pipeline_summary.write_pipeline_summary
+    paramub.pipeline.summary.write_pipeline_summary
         → outputs/integrate/<base>_summary.json
 
 Logs:
@@ -217,7 +217,7 @@ def main():
                 sys.exit("[pipeline] stage 4 failed")
 
         # Consolidated summary across all stages.
-        from paramub.pipeline_summary import write_pipeline_summary
+        from paramub.pipeline.summary import write_pipeline_summary
         summary_path = write_pipeline_summary(
             base,
             shell_dir=args.shell_dir,

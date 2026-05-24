@@ -31,7 +31,7 @@
 
 <h2 id="overview">Overview</h2>
 <p>
-  <code>paramub.tire_builder.build_tire(spec, z_bead_mm)</code> builds the
+  <code>paramub.builders.tire.build_tire(spec, z_bead_mm)</code> builds the
   outer rubber tire. The 2D radial cross-section is revolved 360° about the
   spin axis. The sidewall is a single cubic Bezier from the bead to the
   tread edge; its end tangent is forced to match the tangent of the tread
@@ -42,7 +42,7 @@
   <code>z_bead_mm</code> is the axial offset of each bead from the
   midplane. In a normal wheel assembly this is
   <code>wheel_width_mm / 2</code>, which the
-  <a href="../wheel_assem.py">wheel assembler</a> supplies automatically.
+  <a href="../builders/wheel.py">wheel assembler</a> supplies automatically.
 </p>
 
 <h2 id="dimensions">Cross-section &amp; dimensions</h2>

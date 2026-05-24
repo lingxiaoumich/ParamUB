@@ -30,10 +30,10 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 
-from paramub.floor_builder import FloorSpec
-from paramub.spoke_builder import SpokeSpec
-from paramub.tire_builder import TireSpec
-from paramub.wheelhouse_builder import WheelhouseSpec
+from paramub.builders.floor import FloorSpec
+from paramub.builders.spoke import SpokeSpec
+from paramub.builders.tire import TireSpec
+from paramub.builders.wheelhouse import WheelhouseSpec
 
 OUT = Path(__file__).resolve().parent / "diagrams"
 OUT.mkdir(parents=True, exist_ok=True)

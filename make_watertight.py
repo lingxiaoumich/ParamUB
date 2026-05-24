@@ -6,7 +6,7 @@ ribbons, ~5 k open edges / ~1 k non-manifold edges), runs the smooth
 dual-contouring remesh + symmetrize + non-manifold cleanup loop, then
 extracts the biggest connected body and writes a strictly watertight,
 bilaterally symmetric, single-body STL ready for CFD / 3-D printing /
-volume computation. See :mod:`paramub.watertight` for the algorithm.
+volume computation. See :mod:`paramub.pipeline.watertight` for the algorithm.
 
 Pipeline summary
 ----------------
@@ -62,7 +62,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from paramub.watertight import (
+from paramub.pipeline.watertight import (
     WHEEL_CORNERS, discover_wheel_paths, make_watertight,
     make_wheel_watertight,
 )

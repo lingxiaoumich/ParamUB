@@ -1,62 +1,52 @@
 """ParamUB — parametric car wheel + underbody generator.
 
-Public modules (clean, refactored):
+Sub-packages:
 
-  tire_builder       — TireSpec, build_tire()
-  spoke_builder      — SpokeSpec, build_spoke_disc(), build_rim_barrel(),
-                       cut_spoke_windows()
-  wheel_assem        — WheelSpec, assemble_wheel()
-  wheelhouse_builder — WheelhouseSpec, build_wheelhouse_solid(),
-                       extract_wheelhouse_surfaces()
-  floor_builder      — FloorSpec, build_floor(),
-                       DiffuserSection, SplitterSection (multisection
-                       Bezier splitter + diffuser; see
-                       docs/multisection_diffuser.html),
-                       cubic_bezier_edge(), cubic_bezier_from_tangents()
-                       (standalone Bezier primitives)
-  ub_assem           — UnderbodySpec, build_underbody(spec)
-  generate           — generate(spec, output_mode={'stl', 'all'},
-                                stl_tolerance_mm=0.1,
-                                stl_angular_tolerance_rad=0.1,
-                                floor_angular_tolerance_rad=0.02)
+  builders/    CAD-side parametric pieces (tire / spoke / wheel /
+               wheelhouse / floor / ub_assem). Requires cadquery.
+  shell/       Upper-body shell extraction (extract / recut / render).
+               Trimesh / scipy / shapely; no cadquery dependency.
+  pipeline/    Stage-4 post-trim finishers
+               (watertight, summary).  Trimesh + bpy 4.2.
 
-Old prototypes are preserved under paramub/debug/.
+Top-level:
 
-See paramub/docs/index.html (or userguide.html for the quick start)
-for full documentation. ``examples/makeUB.py`` and
-``examples/makeUB_example.py`` are runnable examples;
-``integrate_underbody.py`` bridges an extracted upper-body shell with
-a matching parametric UB.
+  generate     :func:`generate` — high-level entry point that runs the
+               full assembly + writes the chosen output bundle.
+
+For convenience the public names from builders/ are re-exported at the
+top level, so::
+
+    from paramub import UnderbodySpec, generate, TireSpec
+
+still works.
+
+Old monolithic prototypes are preserved under ``paramub/debug/``.
+
+See ``paramub/docs/index.html`` (or ``userguide.html`` for the quick
+start) for the full documentation. The standalone demos live in
+``examples/`` (``examples/makeUB.py`` and
+``examples/makeUB_example.py``). The reconstructed-car pipeline
+drivers — ``run_shell.py``, ``integrate_underbody.py``,
+``fill_gap.py``, ``make_watertight.py`` and the master orchestrator
+``make_pipeline.py`` — live at the repo root.
 """
 
 # The CAD-side builders depend on cadquery. Wrap their re-exports in a
-# try/except so non-CAD submodules of paramub (e.g. shell_extract,
-# shell_recut, watertight) stay importable in environments without
-# cadquery installed — needed for stages 1/3/4 of the reconstructed-car
-# pipeline, which don't touch cadquery.
+# try/except so non-CAD submodules of paramub (e.g. paramub.shell.extract,
+# paramub.shell.recut, paramub.pipeline.watertight) stay importable in
+# environments without cadquery installed — needed for stages 1/3/4 of
+# the reconstructed-car pipeline, which don't touch cadquery.
 try:
-    from .tire_builder import TireSpec, build_tire
-    from .spoke_builder import (
-        SpokeSpec,
-        build_spoke_disc,
-        cut_spoke_windows,
-        build_rim_barrel,
+    from .builders import (
+        TireSpec, build_tire,
+        SpokeSpec, build_spoke_disc, cut_spoke_windows, build_rim_barrel,
+        WheelSpec, assemble_wheel,
+        WheelhouseSpec, build_wheelhouse_solid, extract_wheelhouse_surfaces,
+        DiffuserSection, FloorSpec, SplitterSection, build_floor,
+        cubic_bezier_edge, cubic_bezier_from_tangents,
+        UnderbodySpec, build_underbody,
     )
-    from .wheel_assem import WheelSpec, assemble_wheel
-    from .wheelhouse_builder import (
-        WheelhouseSpec,
-        build_wheelhouse_solid,
-        extract_wheelhouse_surfaces,
-    )
-    from .floor_builder import (
-        DiffuserSection,
-        FloorSpec,
-        SplitterSection,
-        build_floor,
-        cubic_bezier_edge,
-        cubic_bezier_from_tangents,
-    )
-    from .ub_assem import UnderbodySpec, build_underbody
     from .generate import generate
 
     __all__ = [

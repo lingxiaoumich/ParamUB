@@ -283,22 +283,26 @@ python make_watertight.py \
 
 <h2>Layout</h2>
 <pre><code>paramub/
-├── tire_builder.py            # 1 — TireSpec, build_tire
-├── spoke_builder.py           # 2 — SpokeSpec, build_spoke_disc, cut_spoke_windows, build_rim_barrel
-├── wheel_assem.py             # 3 — WheelSpec, assemble_wheel
-├── wheelhouse_builder.py      # 4 — WheelhouseSpec, build_wheelhouse_solid, extract_wheelhouse_surfaces
-├── floor_builder.py           # 5 — FloorSpec, build_floor, build_below_cropper,
-│                              #     DiffuserSection, SplitterSection,
-│                              #     cubic_bezier_edge, cubic_bezier_from_tangents
-├── ub_assem.py                # 6 — UnderbodySpec, build_underbody (full car)
-├── generate.py                # generate(spec, output_mode, *_tolerance_*)
-├── _render_views.py           # PyVista subprocess renderer (no CadQuery imports)
-├── shell_extract.py           # upper-shell extraction (whole-car → upper shell)
-├── shell_recut.py             # longest open-boundary loop → 3-D re-cut of canonical mesh
-├── shell_render.py            # 10-panel matplotlib renderer for shell steps
-├── watertight.py              # smooth-dual-contouring remesh + symmetry + cleanup
-│                              #   (bpy 4.2 stage A; trimesh extract+verify stage B)
-├── pipeline_summary.py        # consolidated <base>_summary.json writer
+├── __init__.py                # top-level re-exports (public API)
+├── generate.py                # high-level entry: generate(spec, output_mode, ...)
+├── _render_views.py           # PyVista subprocess renderer (no cadquery imports)
+├── builders/                  # CAD-side parametric pieces (requires cadquery)
+│   ├── tire.py                # 1 — TireSpec, build_tire
+│   ├── spoke.py               # 2 — SpokeSpec, build_spoke_disc, cut_spoke_windows, build_rim_barrel
+│   ├── wheel.py               # 3 — WheelSpec, assemble_wheel
+│   ├── wheelhouse.py          # 4 — WheelhouseSpec, build_wheelhouse_solid, extract_wheelhouse_surfaces
+│   ├── floor.py               # 5 — FloorSpec, build_floor, build_below_cropper,
+│   │                          #     DiffuserSection, SplitterSection,
+│   │                          #     cubic_bezier_edge, cubic_bezier_from_tangents
+│   └── ub_assem.py            # 6 — UnderbodySpec, build_underbody (full car)
+├── shell/                     # upper-body shell extraction (no cadquery)
+│   ├── extract.py             # whole-car → upper shell
+│   ├── recut.py               # longest open-boundary loop → 3-D re-cut of canonical mesh
+│   └── render.py              # 10-panel matplotlib renderer for shell steps
+├── pipeline/                  # post-trim watertight finisher + summary
+│   ├── watertight.py          # smooth-dual-contouring remesh + symmetry + cleanup
+│   │                          #   (bpy 4.2 stage A; trimesh extract+verify stage B)
+│   └── summary.py             # consolidated <base>_summary.json writer
 │                              #   (geometry inputs + verify outputs)
 ├── docs/                      # ← you are here
 │   ├── index.html

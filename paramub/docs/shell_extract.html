@@ -49,7 +49,7 @@
   y = 0 already and the planar cut was only a holdover from a half-car
   workflow. Each step modifies (or labels faces of) the working mesh and
   writes an STL when run in debug mode. All renders below are produced by
-  <code>paramub.shell_render</code> (10-panel matplotlib composite,
+  <code>paramub.shell.render</code> (10-panel matplotlib composite,
   Lambertian shading, per-step bounds).
 </p>
 <table>
@@ -69,7 +69,7 @@
         <td>Geometric backstop: remove inward-facing faces in an expanded wheelhouse zone (inboard side extended to y = 0 from both sides).</td></tr>
     <tr><td>7</td><td><code>s7_classify_visibility</code></td>
         <td>Per-face two-hemisphere visibility classifier (KEEP / REMOVE / DROP), constrained to a <em>cut zone</em> so distant body parts can't be holed.</td></tr>
-    <tr><td>8</td><td><code>recut_with_longest_rim</code> (<code>paramub.shell_recut</code>)</td>
+    <tr><td>8</td><td><code>recut_with_longest_rim</code> (<code>paramub.shell.recut</code>)</td>
         <td>Trace the longest open-boundary <em>component</em> of the step-7 shell; use its edges as a 3-D scissor on the canonical mesh to recover any faces that step 5–7 over-removed inside the rim.</td></tr>
   </tbody>
 </table>
@@ -382,7 +382,7 @@ gives a poor cut.</p>
 
 <footer>ParamUB — auto-generated user guide.
 Renders produced by <code>python run_shell.py --render</code>
-(see <code>paramub/shell_render.py</code>).</footer>
+(see <code>paramub/shell/render.py</code>).</footer>
 </main>
 </body>
 </html>

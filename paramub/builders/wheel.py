@@ -14,13 +14,13 @@ from dataclasses import dataclass, field
 
 import cadquery as cq
 
-from .spoke_builder import (
+from .spoke import (
     SpokeSpec,
     build_rim_barrel,
     build_spoke_disc,
     cut_spoke_windows,
 )
-from .tire_builder import TireSpec, build_tire
+from .tire import TireSpec, build_tire
 
 
 @dataclass

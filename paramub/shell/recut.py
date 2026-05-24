@@ -189,7 +189,7 @@ def export_edges_as_tubes(mesh, edges: np.ndarray, out_path,
     Returns the number of edges drawn.
     """
     import numpy as np
-    from .shell_extract import edges_to_tube_mesh
+    from .extract import edges_to_tube_mesh
     if len(edges) == 0:
         return 0
     diag = float(np.linalg.norm(mesh.bounds[1] - mesh.bounds[0]))

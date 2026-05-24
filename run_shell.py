@@ -71,7 +71,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from paramub.shell_extract import (
+from paramub.shell.extract import (
     LABEL_KEEP, LABEL_REMOVE, LABEL_DROP,
     build_cut_zone, build_cut_zone_volume_mesh,
     edges_to_tube_mesh,
@@ -83,7 +83,7 @@ from paramub.shell_extract import (
     s7_classify_visibility,
     trace_boundary_edges,
 )
-from paramub.shell_recut import (
+from paramub.shell.recut import (
     recut_with_longest_rim,
     find_open_boundary_components,
     export_edges_as_tubes,
@@ -330,7 +330,7 @@ def main():
     if args.debug:
         _export_keep(body, remove5, debug_dir / "step5_kept.stl")
         # Debug overlay: the cylinder primitives themselves.
-        from paramub.shell_extract import _wheel_cyl_y_bounds  # type: ignore
+        from paramub.shell.extract import _wheel_cyl_y_bounds  # type: ignore
         # Use a thin overlay: the s5 cylinder uses radius_factor=1 and
         # axial_factor=1, symmetric, no outboard extension.
         cyl_overlay = build_cut_zone_volume_mesh(

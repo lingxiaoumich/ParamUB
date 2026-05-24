@@ -1,6 +1,6 @@
 """Unified entry point for ParamUB.
 
-One function — :func:`generate` — takes an :class:`~paramub.ub_assem.UnderbodySpec`
+One function — :func:`generate` — takes an :class:`~paramub.builders.ub_assem.UnderbodySpec`
 and writes outputs to ``output_dir``. The ``output_mode`` argument picks the
 output bundle:
 
@@ -38,7 +38,7 @@ from typing import Literal, Optional
 import cadquery as cq
 from cadquery import exporters
 
-from .ub_assem import UnderbodySpec, build_underbody
+from .builders.ub_assem import UnderbodySpec, build_underbody
 
 
 OutputMode = Literal["stl", "all"]

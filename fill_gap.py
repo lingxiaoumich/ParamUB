@@ -75,7 +75,7 @@ DEFAULT_BASE = (
 def extract_longest_boundary(mesh):
     """Return ``(vertex_indices, edges, perimeter)`` of the longest open
     boundary component of ``mesh``."""
-    from paramub.shell_recut import find_open_boundary_components
+    from paramub.shell.recut import find_open_boundary_components
     _, comps = find_open_boundary_components(mesh)
     if not comps:
         raise RuntimeError("mesh has no open-boundary components")
