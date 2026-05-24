@@ -23,42 +23,61 @@ Public modules (clean, refactored):
 Old prototypes are preserved under paramub/debug/.
 
 See paramub/docs/index.html (or userguide.html for the quick start)
-for full documentation. The repo-root scripts ``makeUB.py`` and
-``makeUB_example.py`` are runnable examples; ``integrate_underbody.py``
-bridges an extracted upper-body shell with a matching parametric UB.
+for full documentation. ``examples/makeUB.py`` and
+``examples/makeUB_example.py`` are runnable examples;
+``integrate_underbody.py`` bridges an extracted upper-body shell with
+a matching parametric UB.
 """
 
-from .tire_builder import TireSpec, build_tire
-from .spoke_builder import (
-    SpokeSpec,
-    build_spoke_disc,
-    cut_spoke_windows,
-    build_rim_barrel,
-)
-from .wheel_assem import WheelSpec, assemble_wheel
-from .wheelhouse_builder import (
-    WheelhouseSpec,
-    build_wheelhouse_solid,
-    extract_wheelhouse_surfaces,
-)
-from .floor_builder import (
-    DiffuserSection,
-    FloorSpec,
-    SplitterSection,
-    build_floor,
-    cubic_bezier_edge,
-    cubic_bezier_from_tangents,
-)
-from .ub_assem import UnderbodySpec, build_underbody
-from .generate import generate
+# The CAD-side builders depend on cadquery. Wrap their re-exports in a
+# try/except so non-CAD submodules of paramub (e.g. shell_extract,
+# shell_recut, watertight) stay importable in environments without
+# cadquery installed — needed for stages 1/3/4 of the reconstructed-car
+# pipeline, which don't touch cadquery.
+try:
+    from .tire_builder import TireSpec, build_tire
+    from .spoke_builder import (
+        SpokeSpec,
+        build_spoke_disc,
+        cut_spoke_windows,
+        build_rim_barrel,
+    )
+    from .wheel_assem import WheelSpec, assemble_wheel
+    from .wheelhouse_builder import (
+        WheelhouseSpec,
+        build_wheelhouse_solid,
+        extract_wheelhouse_surfaces,
+    )
+    from .floor_builder import (
+        DiffuserSection,
+        FloorSpec,
+        SplitterSection,
+        build_floor,
+        cubic_bezier_edge,
+        cubic_bezier_from_tangents,
+    )
+    from .ub_assem import UnderbodySpec, build_underbody
+    from .generate import generate
 
-__all__ = [
-    "TireSpec", "build_tire",
-    "SpokeSpec", "build_spoke_disc", "cut_spoke_windows", "build_rim_barrel",
-    "WheelSpec", "assemble_wheel",
-    "WheelhouseSpec", "build_wheelhouse_solid", "extract_wheelhouse_surfaces",
-    "cubic_bezier_edge", "cubic_bezier_from_tangents",
-    "DiffuserSection", "SplitterSection", "FloorSpec", "build_floor",
-    "UnderbodySpec", "build_underbody",
-    "generate",
-]
+    __all__ = [
+        "TireSpec", "build_tire",
+        "SpokeSpec", "build_spoke_disc", "cut_spoke_windows", "build_rim_barrel",
+        "WheelSpec", "assemble_wheel",
+        "WheelhouseSpec", "build_wheelhouse_solid", "extract_wheelhouse_surfaces",
+        "cubic_bezier_edge", "cubic_bezier_from_tangents",
+        "DiffuserSection", "SplitterSection", "FloorSpec", "build_floor",
+        "UnderbodySpec", "build_underbody",
+        "generate",
+    ]
+except ImportError as _cadquery_import_error:
+    # cadquery (or one of its OCP-bound deps) is missing — leave the
+    # CAD-side names unexported, but let from-import statements on
+    # cadquery-free submodules succeed.
+    import warnings as _warnings
+    _warnings.warn(
+        f"paramub: CAD-side builders unavailable "
+        f"({_cadquery_import_error}). Stages that don't need cadquery "
+        f"(shell_extract, shell_recut, watertight, fill_gap) remain usable.",
+        ImportWarning, stacklevel=2,
+    )
+    __all__ = []

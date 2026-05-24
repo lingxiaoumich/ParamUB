@@ -213,10 +213,60 @@ edge = cubic_bezier_from_tangents(
 <h2 id="reconstruction-pipeline">Reconstructed-car pipeline (end to end)</h2>
 <p>
   If you start from a reconstructed whole-car mesh (UltraShape /
-  Hunyuan3D) and want a watertight body + parametric UB, run the
-  three drivers in order. Each writes into a sibling
-  <code>outputs/</code> subdirectory; the next driver picks up from
-  there.
+  Hunyuan3D) and want a watertight body + parametric UB, you have two
+  paths:
+</p>
+<ul>
+  <li><strong>One-shot</strong>:
+    <code>make_pipeline.py</code> (or its Slurm wrapper
+    <code>make_pipeline.sbatch</code>) runs all four stages on one raw
+    input, tees every stage's stdout into a master log and a per-stage
+    log, and writes a consolidated summary JSON. See
+    <a href="#one-shot">below</a>.</li>
+  <li><strong>Manual</strong>: run the four stage drivers in order,
+    each writing into a sibling <code>outputs/</code> subdirectory.
+    See the per-stage subsections below for the algorithm details.</li>
+</ul>
+
+<h3 id="one-shot">One-shot orchestrator</h3>
+<pre><code>conda activate paramub
+
+# Login node (caps Stage 4 at small depth to fit in 4 GB):
+python make_pipeline.py \
+    --input data/&lt;base&gt;.stl \
+    --skip-watertight
+
+# Production — Slurm wrapper requests 128 GB / 8 CPU / 4 h, runs all 4:
+sbatch make_pipeline.sbatch data/&lt;base&gt;.stl
+</code></pre>
+<p>Produces:</p>
+<ul>
+  <li><code>outputs/shell/&lt;base&gt;_*</code> — stage 1 outputs</li>
+  <li><code>outputs/integrate/&lt;base&gt;_*</code> — stages 2 / 3 / 4 outputs
+    (shell + UB + 4 wheels + gap + combined + fixed + clean + per-corner clean
+    + JSON verify reports)</li>
+  <li><code>outputs/integrate/&lt;base&gt;_summary.json</code> — consolidated
+    summary: all the geometry knobs the parametric UB used (wheel centres,
+    tire spec, wheelhouse heights, splitter / diffuser sections, floor z),
+    plus the geometric outputs of the final watertight result (dimensions,
+    triangle counts, watertight flags, volumes per body and per wheel,
+    aggregate totals).</li>
+  <li><code>logs/&lt;base&gt;_pipeline.log</code> — single master log with
+    section banners for each stage; mirror of all stage stdout</li>
+  <li><code>logs/&lt;base&gt;_stage_&lt;n&gt;_&lt;name&gt;.log</code> — per-stage
+    log (one file per driver, easier to grep for one stage's output)</li>
+</ul>
+<p>
+  Per-stage flags can be forwarded after the input. The orchestrator
+  also exposes <code>--skip-shell</code>, <code>--skip-integrate</code>,
+  <code>--skip-fillgap</code>, <code>--skip-watertight</code> for
+  partial reruns.
+</p>
+
+<h3 id="manual">Manual stage-by-stage</h3>
+<p>
+  Each stage writes into a sibling <code>outputs/</code> subdirectory;
+  the next driver picks up from there.
 </p>
 <pre><code>conda activate paramub
 BASE=outputs
@@ -246,6 +296,18 @@ LD_LIBRARY_PATH=$CONDA_PREFIX/lib python fill_gap.py \
     --repair-remesh-mm 6 --repair-remesh-iters 3
 # → $BASE/integrate/car_gap.stl       (ribbon mesh alone)
 # → $BASE/integrate/car_combined.stl  (shell + UB + ribbons, repaired)
+
+# 4. Smooth-dual-contouring remesh + symmetry + cleanup → strictly
+#    watertight body STL, plus a trimesh-only fill_holes pass on each
+#    of the 4 adjacent wheel STLs. Defaults to depth 11 (production);
+#    submit via the Slurm wrapper since the Blender peak is ~96 GB.
+sbatch make_watertight.sbatch \
+    $BASE/integrate/car_combined.stl  car
+# → $BASE/integrate/car_fixed.stl                       (Blender stage output)
+# → $BASE/integrate/car_clean.stl                       (watertight body)
+# → $BASE/integrate/car_clean.json                      (body verify report)
+# → $BASE/integrate/car_wheel_{FL,FR,RL,RR}_clean.stl   (4 watertight wheels)
+# → $BASE/integrate/car_wheel_{FL,FR,RL,RR}_clean.json  (per-wheel reports)
 </code></pre>
 <div class="callout info">
   <code>LD_LIBRARY_PATH=$CONDA_PREFIX/lib</code> is needed wherever
@@ -299,6 +361,47 @@ LD_LIBRARY_PATH=$CONDA_PREFIX/lib python fill_gap.py \
   end-to-end snippet above. The <a href="fill_gap.html">fill_gap
   guide</a> has the algorithm details, all tuning knobs, and known
   limits.
+</p>
+
+<h3 id="watertight">Step 4 — strictly watertight finisher (body + 4 wheels)</h3>
+<p>
+  Step 3 produces a closed mesh, but the combined STL still has a
+  handful of non-manifold edges (apex-sharing in the ribbon strip,
+  plus close_holes residuals), inconsistent face winding, and
+  hundreds of disconnected micro-bodies from STL float round-trip.
+  Real CFD / 3-D-print toolchains reject meshes like that.
+  <code>make_watertight.py</code> turns it into a strictly watertight
+  single body, then also runs a fast trimesh-only finisher on each of
+  the 4 wheel STLs adjacent to the input:
+</p>
+<ol>
+  <li><strong>Stage A (Blender, bpy 4.2)</strong>: import STL → Smooth
+    Remesh modifier (dual-contouring at octree depth 11) → keep largest
+    component → merge / dissolve / fill_holes / normals consistent →
+    symmetrize at y=0 → iterative delete-non-manifold-and-refill loop
+    → export <code>&lt;tag&gt;_fixed.stl</code>.</li>
+  <li><strong>Stage B (trimesh)</strong>: split by connected components,
+    keep the biggest (drops 2-6 face Blender-STL micro-strays from
+    float32 vertex rounding), verify
+    <code>is_watertight == True</code> /
+    <code>is_winding_consistent == True</code> /
+    <code>len(split()) == 1</code>, write
+    <code>&lt;tag&gt;_clean.stl</code> + JSON report.</li>
+  <li><strong>Wheels (trimesh only)</strong>: each
+    <code>&lt;base&gt;_wheel_&lt;corner&gt;.stl</code> goes through
+    <code>fill_holes</code> + biggest-body + verify. CadQuery-tessellated
+    wheels are already consistent-winding and single-component; only
+    ~6 chord-discretization open edges need closing per wheel. Mean
+    distance to the source wheel STL is ≈ 1e−12 mm. Pass
+    <code>--no-wheels</code> to skip this stage.</li>
+</ol>
+<p>
+  At depth 11 (recommended for production) the Blender peak is ~96 GB
+  on a ~4.5 m car — use the Slurm wrapper rather than the login node.
+  Lighter depths (8–9) run comfortably in &lt; 8 GB. See the
+  <a href="watertight.html">watertight guide</a> for the
+  depth-vs-fidelity table, all tuning knobs, and known limits
+  (including how to handle non-Y symmetry axes and Genus &gt; 0).
 </p>
 
 <footer>ParamUB — see <code>paramub/</code> for source. Frozen prototypes live in <code>paramub/debug/</code>.</footer>

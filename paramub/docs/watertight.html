@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Watertight finisher</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Post-processor</div>
+  <h1>Watertight finisher — Blender smooth remesh + trimesh extract</h1>
+  <p class="subtitle">
+    Turn the <a href="fill_gap.html"><code>fill_gap</code></a>-combined STL
+    (~1 M tris, ~5 k open edges, ~1 k non-manifold edges, hundreds of
+    micro-bodies) into a <strong>strictly watertight, bilaterally
+    symmetric, single-body STL</strong> suitable for CFD, 3-D printing,
+    and volume computation.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#why">Why this is its own step</a></li>
+    <li><a href="#pipeline">Pipeline</a></li>
+    <li><a href="#install">Install</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#outputs">Outputs</a></li>
+    <li><a href="#depth">Depth / fidelity / RAM</a></li>
+    <li><a href="#verify">Watertight check semantics</a></li>
+    <li><a href="#tuning">Tuning knobs</a></li>
+    <li><a href="#limits">Known limits</a></li>
+  </ul>
+</nav>
+
+<h2 id="why">Why this is its own step</h2>
+<p>
+  <code>fill_gap.py</code> seals the ribbon between shell and UB rims
+  and (with <code>--repair --repair-remesh-mm</code>) produces a mesh
+  with <em>zero</em> open edges. But its output is still not strictly
+  watertight in the sense that downstream consumers expect:
+</p>
+<ul>
+  <li>It typically has a handful of non-manifold edges (apex-sharing in
+    the ribbon strip, plus a few residuals from PyMeshLab's <code>close_holes</code>
+    fan triangulation).</li>
+  <li>Face winding is inconsistent — the ribbon-zip emits triangles in
+    zip order, not aligned with the shell / UB outward normals.</li>
+  <li>The mesh has hundreds of disconnected micro-bodies (left over
+    from the variant-M ribbon plus PyMeshLab artifacts), so even though
+    the BIG body is closed, <code>trimesh.is_watertight</code> on the
+    raw STL returns False.</li>
+</ul>
+<p>
+  These three things together are what real CFD / 3-D-print toolchains
+  refuse. This stage is a robust post-processor that makes the result
+  pass <code>trimesh.is_watertight == True</code>,
+  <code>is_winding_consistent == True</code>, and
+  <code>len(split()) == 1</code> in one shot.
+</p>
+
+<h2 id="pipeline">Pipeline</h2>
+<pre><code>Input STL (non-watertight, many bodies, gaps)
+        │
+        ▼
+   ┌─────────────────────────────────────────────────┐
+   │ STAGE A : Blender (bpy 4.2)                     │
+   │  1. import STL                                  │
+   │  2. Smooth Remesh modifier (dual-contouring,    │
+   │     octree depth N, scale 0.99)                 │
+   │  3. keep largest connected component            │
+   │  4. merge-by-distance / dissolve-degenerate /   │
+   │     fill_holes / normals consistent             │
+   │  5. symmetrize at y=0 (NEGATIVE_Y)              │
+   │  6. iterative non-manifold edge cleanup         │
+   │     (max --max-nm-passes; exits on convergence) │
+   │  7. keep largest connected component again      │
+   │  8. export STL  (&lt;stem&gt;_fixed.stl)              │
+   └─────────────────────────────────────────────────┘
+        │
+        ▼
+   ┌─────────────────────────────────────────────────┐
+   │ STAGE B : trimesh                               │
+   │  9. split STL by connected components           │
+   │ 10. keep the largest body (drops Blender STL    │
+   │     float32 micro-strays)                       │
+   │ 11. verify watertight + record metrics          │
+   │ 12. export STL (&lt;stem&gt;_clean.stl) + JSON report │
+   └─────────────────────────────────────────────────┘
+        │
+        ▼
+Output - &lt;stem&gt;_clean.stl   strictly watertight, single body
+       - &lt;stem&gt;_clean.json  verify report
+</code></pre>
+<p>
+  Smooth dual-contouring is the core because it produces a closed
+  iso-surface from any input triangle soup and merges nearby
+  disconnected parts as long as they sit within ~bbox / 2^depth of
+  each other. The symmetrize pass folds left/right asymmetries and
+  provides a free Y-symmetry guarantee. The
+  delete-non-manifold-edges-and-refill loop handles the few 3-face
+  edges the remesh leaves behind.
+</p>
+
+<h2 id="install">Install</h2>
+<p>
+  bpy 4.2 ships as a pip wheel and coexists in the existing
+  <code>paramub</code> conda env alongside cadquery / trimesh /
+  pyvista. <code>rtree</code> is also needed for the optional
+  reference-distance metric in the verify report:
+</p>
+<pre><code>conda activate paramub
+pip install bpy==4.2.0 rtree
+</code></pre>
+<p>
+  Verify with <code>python -c "import bpy, rtree; print(bpy.app.version)"</code>.
+  Without <code>rtree</code>, the pipeline still produces a strictly
+  watertight STL — only the
+  <code>dist_remesh_to_orig_mm</code> / <code>dist_orig_to_remesh_mm</code>
+  fields of the JSON verify report are skipped (with a single
+  console warning).
+</p>
+
+<h2 id="usage">Usage</h2>
+<p>
+  Stage 4 of the reconstructed-car pipeline. Recommended setup is one
+  Slurm node at depth 11 (~96 GB Blender peak); see
+  <code>make_watertight.sbatch</code> for the 128 GB / 8 CPU / 3 h
+  wrapper.
+</p>
+
+<h3>Slurm (default — production depth 11)</h3>
+<pre><code>sbatch make_watertight.sbatch \
+    outputs/integrate/&lt;base&gt;_combined.stl \
+    &lt;tag&gt;
+</code></pre>
+<p>
+  Default depth is 11. The wrapper requests 128 GB / 8 CPUs / 3 hours
+  on the standard partition and writes Slurm logs under
+  <code>logs/</code>. Any extra args after the tag are forwarded to
+  <code>make_watertight.py</code> (e.g.
+  <code>--no-symmetrize</code>, <code>--depth 12</code>).
+</p>
+
+<h3>Login-node quick-check (depth 8, ~15 s)</h3>
+<pre><code>conda activate paramub
+python make_watertight.py \
+    --input  outputs/integrate/&lt;base&gt;_combined.stl \
+    --output outputs/integrate/&lt;base&gt;_clean.stl \
+    --depth 8          # validates pipeline; ~0.8 mm error, 9 MB out
+</code></pre>
+<p>
+  Use this to sanity-check the install or to iterate quickly while
+  tuning other flags. The production result lives at depth 11 (~0.4 mm
+  error, 611 MB out) and needs the Slurm wrapper.
+</p>
+
+<h3>Python API</h3>
+<pre><code>from paramub.watertight import make_watertight
+
+report = make_watertight(
+    "outputs/integrate/&lt;base&gt;_combined.stl",
+    fixed_stl   = "outputs/integrate/&lt;base&gt;_fixed.stl",
+    clean_stl   = "outputs/integrate/&lt;base&gt;_clean.stl",
+    report_json = "outputs/integrate/&lt;base&gt;_clean.json",
+    reference_stl = "outputs/integrate/&lt;base&gt;_combined.stl",
+    depth=11,
+)
+print(report["is_watertight"], report["volume_m3"])
+</code></pre>
+
+<h2 id="outputs">Outputs</h2>
+<p>
+  By default the stage processes both the body (from
+  <code>&lt;base&gt;_combined.stl</code>) and the 4 wheel STLs that
+  <code>integrate_underbody.py</code> wrote adjacent to it
+  (<code>&lt;base&gt;_wheel_{front_left, front_right, rear_left,
+  rear_right}.stl</code>). The wheels go through a fast trimesh-only
+  finisher (<code>fill_holes</code> + biggest body + verify) since each
+  one is already single-component and consistent-winding from the
+  CadQuery tessellation; only a handful of chord-discretization open
+  edges need closing. Pass <code>--no-wheels</code> to disable.
+</p>
+<table>
+  <thead><tr><th>File</th><th>Contents</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;stem&gt;_fixed.stl</code></td>
+        <td>Blender-stage output for the body. Closed per Blender's
+            topology check, but typically retains 2–6 face micro-strays
+            from STL float32 vertex rounding. Useful for debugging the
+            Blender stage in isolation.</td></tr>
+    <tr><td><code>&lt;stem&gt;_clean.stl</code></td>
+        <td>Final strictly-watertight, single-body, bilaterally
+            symmetric body STL.</td></tr>
+    <tr><td><code>&lt;stem&gt;_clean.json</code></td>
+        <td>Verify report for the body — vertices / faces, watertight,
+            winding, Euler number, bbox, surface area, volume (if
+            watertight), and (when a reference STL is given) symmetric
+            point-to-surface distances in mm.</td></tr>
+    <tr><td><code>&lt;stem&gt;_wheel_&lt;corner&gt;_clean.stl</code></td>
+        <td>One per wheel (front_left / front_right / rear_left /
+            rear_right). Strictly watertight, single body, ~222 k tris
+            each (~11 MB). The trimesh-side <code>fill_holes</code>
+            only adds the missing closure triangles; mean distance to
+            the source wheel STL is ≈ 1e−12 mm.</td></tr>
+    <tr><td><code>&lt;stem&gt;_wheel_&lt;corner&gt;_clean.json</code></td>
+        <td>Verify report per wheel.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="depth">Depth / fidelity / RAM</h2>
+<p>Measured on a ~4.5 m car with ~1.09 M input triangles.
+<em>Raw</em> = smooth remesh output before any cleanup.
+<em>Clean</em> = after the full pipeline. Distance is mean
+orig→remesh (mm).</p>
+<table>
+  <thead><tr><th><code>--depth</code></th>
+             <th class="num">tris (raw)</th>
+             <th class="num">mean error raw</th>
+             <th class="num">tris (clean)</th>
+             <th class="num">mean error clean</th>
+             <th class="num">clean STL size</th>
+             <th>approx peak RAM</th></tr></thead>
+  <tbody>
+    <tr><td>8 </td><td class="num">198 K</td><td class="num">0.53 mm</td>
+        <td class="num">199 K</td><td class="num">0.82 mm</td>
+        <td class="num">9 MB</td><td>~4 GB</td></tr>
+    <tr><td>9 </td><td class="num">798 K</td><td class="num">0.16 mm</td>
+        <td class="num">≈ 800 K</td><td class="num">≈ 0.5 mm</td>
+        <td class="num">≈ 40 MB</td><td>~8 GB</td></tr>
+    <tr><td>10</td><td class="num">3.2 M</td><td class="num">0.045 mm</td>
+        <td class="num">≈ 3.2 M</td><td class="num">≈ 0.4 mm</td>
+        <td class="num">≈ 160 MB</td><td>~24 GB</td></tr>
+    <tr><td><strong>11</strong></td>
+        <td class="num"><strong>12.8 M</strong></td>
+        <td class="num"><strong>0.014 mm</strong></td>
+        <td class="num"><strong>12.8 M</strong></td>
+        <td class="num"><strong>0.38 mm</strong></td>
+        <td class="num"><strong>611 MB</strong></td>
+        <td><strong>~96 GB</strong></td></tr>
+  </tbody>
+</table>
+<p>
+  The cleanup loses ~0.3 mm of fidelity at any depth: symmetrize
+  averages small left/right asymmetries, and the non-manifold fix
+  deletes ~150-400 face neighbourhoods and refills them with simpler
+  patches.
+</p>
+
+<h2 id="verify">Watertight check semantics</h2>
+<p>
+  After stage B, the clean STL satisfies:
+</p>
+<pre><code>m = trimesh.load(clean_stl, force="mesh")
+assert m.is_watertight          # every edge has exactly 2 incident faces
+assert m.is_winding_consistent  # face normals point outward consistently
+assert len(m.split()) == 1      # exactly one connected component
+m.volume                        # well-defined m³ * 1e9
+</code></pre>
+<div class="callout info">
+  <strong>Note on Euler / genus.</strong> A watertight mesh can have any
+  genus. For the test car we get <code>euler = -10</code> at depth 11,
+  i.e. genus 6 — the surface has 6 through-tunnels (wheel wells, cabin
+  opening, intake/exhaust). This is expected and does <em>not</em> mean
+  the mesh is broken; it just means the closed surface is topologically
+  a 6-handled solid rather than a sphere.
+</div>
+
+<h2 id="tuning">Tuning knobs</h2>
+<table>
+  <thead><tr><th>flag</th><th class="num">default</th><th>meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>--depth N</code></td>
+        <td class="num">11</td>
+        <td>Octree depth for Smooth Remesh. 2^N cells across the
+            longest bbox axis. Memory/time scale ~8× per +1.</td></tr>
+    <tr><td><code>--scale F</code></td>
+        <td class="num">0.99</td>
+        <td>Remesh modifier grid scale (0..0.99). Lower = more bbox
+            padding.</td></tr>
+    <tr><td><code>--no-symmetrize</code></td>
+        <td class="num">off</td>
+        <td>Skip the y=0 symmetry pass.</td></tr>
+    <tr><td><code>--symmetry-direction</code></td>
+        <td class="num">NEGATIVE_Y</td>
+        <td>Source side for <code>symmetrize</code>: <code>NEGATIVE_Y</code>
+            keeps y&lt;0 and mirrors to y&gt;0. Other axes / signs accepted.</td></tr>
+    <tr><td><code>--no-fix-nonmanifold</code></td>
+        <td class="num">off</td>
+        <td>Skip the delete-NM-edges-and-refill loop.</td></tr>
+    <tr><td><code>--max-nm-passes N</code></td>
+        <td class="num">20</td>
+        <td>Cap on non-manifold fix iterations. Loop exits early when
+            NM / boundary / NM-verts hit 0.</td></tr>
+    <tr><td><code>--merge-distance MM</code></td>
+        <td class="num">1e-3</td>
+        <td>Vertex merge threshold (mm). Also used by <code>symmetrize</code>'s
+            seam weld and <code>dissolve_degenerate</code>'s threshold.</td></tr>
+    <tr><td><code>--fill-sides N</code></td>
+        <td class="num">16</td>
+        <td>Max hole size (in edges) for <code>fill_holes</code>. The
+            non-manifold-fix loop uses <code>4 × N</code> for the larger
+            refilled holes.</td></tr>
+    <tr><td><code>--n-samples N</code></td>
+        <td class="num">30 000</td>
+        <td>Points sampled per surface for the surface-distance metrics
+            in the verify report.</td></tr>
+    <tr><td><code>--reference PATH</code></td>
+        <td class="num">--input</td>
+        <td>Reference STL for distance metrics. Defaults to the same
+            file as <code>--input</code>; pass an empty string to skip.</td></tr>
+    <tr><td><code>--include-wheels</code> / <code>--no-wheels</code></td>
+        <td class="num">on</td>
+        <td>Process the 4 adjacent wheel STLs through a fast
+            trimesh-only <code>fill_holes</code> + verify pipeline.
+            Default ON. Wheels share the input's base name (e.g.
+            <code>&lt;base&gt;_combined.stl</code> →
+            <code>&lt;base&gt;_wheel_&lt;corner&gt;.stl</code>).</td></tr>
+  </tbody>
+</table>
+
+<h2 id="limits">Known limits and tweak points</h2>
+<ul>
+  <li><strong>Genus is not controlled.</strong> If you need a genus-0
+    (sphere-topology) result, add a pre-step that closes through-tunnels:
+    a Solidify modifier with a thickness larger than the largest tunnel,
+    or an OpenVDB morphological close.</li>
+  <li><strong>Non-manifold convergence is heuristic.</strong> The
+    delete-and-refill loop has always converged in our tests (≤ 8
+    passes), but a pathological input could hit the cap. If
+    <code>--max-nm-passes</code> is exhausted without convergence, the
+    Blender stage output will still have a small number of non-manifold
+    edges; the trimesh stage will then report
+    <code>is_watertight == False</code>. Either raise
+    <code>--max-nm-passes</code> or pre-process with a coarse voxel
+    remesh.</li>
+  <li><strong>STL float32 round-trip.</strong> Stage B reliably catches
+    the 2–6 face micro-strays Blender's STL exporter introduces. If a
+    downstream consumer re-saves the STL through a non-<code>process=True</code>
+    loader, the artifacts may re-appear; consider exporting
+    <code>.ply</code> or <code>.obj</code> instead, where each vertex is
+    stored once.</li>
+  <li><strong>Symmetry axis.</strong> Y is hard-coded as the
+    symmetry-direction default. For inputs whose symmetry plane is not
+    y=0, pass e.g. <code>--symmetry-direction NEGATIVE_X</code>.</li>
+  <li><strong>Memory.</strong> Depth 12 was not tested; expect ~50 M
+    tris and ~30 GB peak just for the bpy data structures. Increase
+    <code>--mem</code> in <code>make_watertight.sbatch</code>
+    accordingly.</li>
+</ul>
+
+<footer>ParamUB — see <code>paramub/watertight.py</code> and
+<code>make_watertight.py</code> for source.</footer>
+</main>
+</body>
+</html>

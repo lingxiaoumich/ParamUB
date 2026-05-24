@@ -9,9 +9,12 @@ This is step 3 of the reconstructed-car body pipeline:
     2.  integrate_underbody.py  -- drop in parametric UB, trim to shell
     3.  fill_gap.py             -- close the residual shell <-> UB
                                    rim ribbon  (this script)
+    4.  make_watertight.py      -- Blender smooth-remesh + trimesh
+                                   extract -> strictly watertight body
 
-See ``paramub/docs/fill_gap.html`` for the full HTML guide and
-``paramub/docs/index.html`` for the pipeline overview.
+See ``paramub/docs/fill_gap.html`` for the full HTML guide for this
+script, ``paramub/docs/watertight.html`` for the stage-4 finisher,
+and ``paramub/docs/index.html`` for the pipeline overview.
 
 Approach: per-UB-vert slant + bipartite-zip ribbon strip
 --------------------------------------------------------

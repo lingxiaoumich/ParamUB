@@ -13,17 +13,31 @@
   <p class="subtitle">
     Six builders compose into one car-underbody assembly. Builders 1–2
     feed builder 3 (wheel); builders 4–5 plus four wheels feed builder 6
-    (underbody). Wrapped around that, a three-stage pipeline turns a
-    reconstructed whole-car mesh into a clean body + UB combination:
-    <a href="shell_extract.html">shell extraction</a> peels the upper
-    body off the input mesh, <code>integrate_underbody.py</code> drops
-    in the parametric underbody and trims it to the shell silhouette,
-    and <a href="fill_gap.html"><code>fill_gap.py</code></a> closes the
-    residual ribbon between the two rims.
+    (underbody). Wrapped around that, a four-stage pipeline turns a
+    reconstructed whole-car mesh into a strictly watertight body + UB
+    solid: <a href="shell_extract.html">shell extraction</a> peels the
+    upper body off the input mesh,
+    <code>integrate_underbody.py</code> drops in the parametric
+    underbody and trims it to the shell silhouette,
+    <a href="fill_gap.html"><code>fill_gap.py</code></a> closes the
+    residual ribbon between the two rims, and
+    <a href="watertight.html"><code>make_watertight.py</code></a> runs a
+    smooth-dual-contouring remesh + symmetry + non-manifold cleanup that
+    produces a single closed body ready for CFD / 3-D printing / volume
+    computation.
   </p>
 </header>
 
 <h2>Full pipeline (reconstructed car → watertight body)</h2>
+<p>
+  Four stage drivers, plus a master orchestrator
+  (<code>make_pipeline.py</code> /
+  <code>make_pipeline.sbatch</code>) that runs all four in order, tees
+  stdout into one log per stage <em>and</em> one master log, and
+  writes a consolidated <code>&lt;base&gt;_summary.json</code> with
+  every geometry knob the parametric UB used alongside the verify
+  metrics of the final watertight result.
+</p>
 <table>
   <thead><tr><th>#</th><th>Driver</th><th>What it does</th><th>Inputs</th><th>Outputs</th><th>Guide</th></tr></thead>
   <tbody>
@@ -51,6 +65,37 @@
         <td><code>outputs/integrate/&lt;car&gt;_{shell, underbody_trimmed}.stl</code></td>
         <td><code>outputs/integrate/&lt;car&gt;_{gap, combined}.stl</code></td>
         <td><a href="fill_gap.html">fill_gap.html</a></td></tr>
+    <tr><td>4</td><td><code>make_watertight.py</code></td>
+        <td>Smooth-dual-contouring remesh (Blender / bpy 4.2) +
+            symmetrize + iterative non-manifold cleanup, then trimesh
+            biggest-body extract + watertight verify. Also runs a fast
+            trimesh-only finisher on each of the 4 adjacent wheel STLs.
+            Heavy step — body recommended via the included Slurm
+            wrapper.</td>
+        <td><code>outputs/integrate/&lt;car&gt;_{combined, wheel_*}.stl</code></td>
+        <td><code>outputs/integrate/&lt;car&gt;_{fixed, clean}.stl</code>,
+            <code>&lt;car&gt;_wheel_&lt;corner&gt;_clean.stl</code> ×4,
+            <code>&lt;car&gt;_clean.json</code> +
+            <code>&lt;car&gt;_wheel_&lt;corner&gt;_clean.json</code> ×4</td>
+        <td><a href="watertight.html">watertight.html</a></td></tr>
+    <tr><td colspan="2"><strong>orchestrator</strong>
+        <code>make_pipeline.py</code></td>
+        <td>Runs all four stages on one raw input as subprocesses,
+            tees every stage's stdout into a per-stage log
+            (<code>logs/&lt;base&gt;_stage_&lt;n&gt;_&lt;name&gt;.log</code>)
+            <em>and</em> a master log
+            (<code>logs/&lt;base&gt;_pipeline.log</code>), then writes
+            a consolidated
+            <code>outputs/integrate/&lt;base&gt;_summary.json</code>
+            with geometry inputs (wheel centres, tire spec, wheelhouse
+            heights, splitter/diffuser sections, floor z) and
+            geometric outputs (per-part dimensions, triangle counts,
+            watertight flags, volumes).</td>
+        <td><code>data/&lt;base&gt;.stl</code></td>
+        <td>everything above, plus
+            <code>outputs/integrate/&lt;base&gt;_summary.json</code>
+            and master / per-stage logs under <code>logs/</code></td>
+        <td><a href="userguide.html#reconstruction-pipeline">userguide</a></td></tr>
   </tbody>
 </table>
 
@@ -196,6 +241,46 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
 <p>See the <a href="fill_gap.html">fill_gap guide</a> for tuning knobs
 and known limits.</p>
 
+<h2>Watertight finisher — <code>make_watertight.py</code></h2>
+<p>
+  <code>fill_gap.py --repair --repair-remesh-mm 6</code> already produces
+  a mesh with zero open edges, but it can have a handful of
+  non-manifold edges (apex-sharing ribbons, close_holes fan residuals),
+  inconsistent face winding, and hundreds of tiny disconnected bodies
+  from the STL float-round-trip. Real CFD / 3-D-print toolchains refuse
+  meshes like that. <code>make_watertight.py</code> is the robust
+  finisher: it runs a smooth dual-contouring remesh in Blender
+  (<code>bpy 4.2</code>) + Y-symmetry + iterative non-manifold cleanup,
+  then extracts the largest connected body in trimesh and verifies
+  <code>is_watertight == True</code>,
+  <code>is_winding_consistent == True</code>,
+  <code>len(split()) == 1</code>.
+</p>
+<pre><code># Production — default depth 11 (~96 GB peak, ~25 min, ~0.4 mm error):
+sbatch make_watertight.sbatch \
+    outputs/integrate/&lt;name&gt;_combined.stl \
+    &lt;tag&gt;
+
+# Login-node sanity check at depth 8 (~4 GB peak, ~15 s, ~0.8 mm error):
+python make_watertight.py \
+    --input  outputs/integrate/&lt;name&gt;_combined.stl \
+    --output outputs/integrate/&lt;name&gt;_clean.stl \
+    --depth 8
+</code></pre>
+<p>
+  Outputs for the body: <code>&lt;tag&gt;_fixed.stl</code> (Blender
+  stage), <code>&lt;tag&gt;_clean.stl</code> (final), and
+  <code>&lt;tag&gt;_clean.json</code> (verify report with watertight /
+  Euler / volume / surface-distance metrics). The 4 adjacent wheel
+  STLs (<code>&lt;base&gt;_wheel_&lt;corner&gt;.stl</code> from stage
+  2) are also processed through a fast trimesh-only
+  <code>fill_holes</code> + verify pass, producing
+  <code>&lt;tag&gt;_wheel_&lt;corner&gt;_clean.stl</code> +
+  <code>.json</code> for each. See the
+  <a href="watertight.html">watertight guide</a> for the depth-vs-fidelity
+  table, Slurm sizing, and tuning knobs.
+</p>
+
 <h2>Layout</h2>
 <pre><code>paramub/
 ├── tire_builder.py            # 1 — TireSpec, build_tire
@@ -211,6 +296,10 @@ and known limits.</p>
 ├── shell_extract.py           # upper-shell extraction (whole-car → upper shell)
 ├── shell_recut.py             # longest open-boundary loop → 3-D re-cut of canonical mesh
 ├── shell_render.py            # 10-panel matplotlib renderer for shell steps
+├── watertight.py              # smooth-dual-contouring remesh + symmetry + cleanup
+│                              #   (bpy 4.2 stage A; trimesh extract+verify stage B)
+├── pipeline_summary.py        # consolidated <base>_summary.json writer
+│                              #   (geometry inputs + verify outputs)
 ├── docs/                      # ← you are here
 │   ├── index.html
 │   ├── userguide.html
@@ -221,6 +310,7 @@ and known limits.</p>
 │   ├── multisection_diffuser.html  # multisection splitter + diffuser API
 │   ├── shell_extract.html
 │   ├── fill_gap.html              # shared-slant gap-fill ribbons + repair
+│   ├── watertight.html            # Blender remesh + extract → strictly watertight STL
 │   ├── _style.css
 │   ├── _make_diagrams.py
 │   └── diagrams/                  # builder diagrams + shell/ step renders
@@ -230,10 +320,16 @@ and known limits.</p>
 run_shell.py                   # 1. driver for the shell-extraction pipeline
 integrate_underbody.py         # 2. bridge shell + parametric UB (anchored splitter + diffuser)
 fill_gap.py                    # 3. close the shell ↔ UB rim ribbon (shared-slant + bipartite zip)
+make_watertight.py             # 4. Blender remesh + trimesh extract → watertight single body
+make_watertight.sbatch         #    Slurm wrapper for stage 4 (128 GB / 8 CPU / 3 h)
 
-# Plain examples / smoke tests
-makeUB.py                      # full-spec UnderbodySpec → generate()
-makeUB_example.py              # smoke-test driver for multisection / splitter / both / mixed modes
+# Master orchestrator — runs all 4 stages + writes summary + master log
+make_pipeline.py               # python make_pipeline.py --input data/<base>.stl
+make_pipeline.sbatch           # sbatch make_pipeline.sbatch data/<base>.stl
+
+# Plain examples / smoke tests (not part of the recon pipeline)
+examples/makeUB.py             # full-spec UnderbodySpec → generate()
+examples/makeUB_example.py     # smoke-test driver for multisection / splitter / both / mixed modes
 </code></pre>
 
 <footer>ParamUB — auto-generated documentation.</footer>
