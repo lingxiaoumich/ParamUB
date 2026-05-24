@@ -1,14 +1,27 @@
 """Fill the gap between the extracted upper shell and the trimmed
 parametric underbody with shared-slant ribbon triangles.
 
+Pipeline position
+-----------------
+This is step 3 of the reconstructed-car body pipeline:
+
+    1.  run_shell.py            -- extract upper-body shell
+    2.  integrate_underbody.py  -- drop in parametric UB, trim to shell
+    3.  fill_gap.py             -- close the residual shell <-> UB
+                                   rim ribbon  (this script)
+
+See ``paramub/docs/fill_gap.html`` for the full HTML guide and
+``paramub/docs/index.html`` for the pipeline overview.
+
 Approach: per-UB-vert slant + bipartite-zip ribbon strip
 --------------------------------------------------------
 1. Extract the longest open boundary of each input mesh: shell rim
-   (~3.7k verts) and UB rim (~1.9k verts).
+   (~3.7k verts on the example car) and UB rim (~1.9k verts).
 2. For each UB rim vert ``u_j``, pick its apex ``apex_j`` = nearest
    shell-rim vert (3-D distance). Subdivide the slant ``u_j → apex_j``
-   into ``K_j`` segments at ``target_edge_mm`` spacing. The slant
-   verts are stored ONCE and reused by both adjacent ribbons.
+   into ``K_j`` segments at ``target_edge_mm`` spacing (default: auto
+   from shell median edge length, typically ~6 mm). The slant verts
+   are stored ONCE and reused by both adjacent ribbons.
 3. For each UB rim edge ``(u_j, u_{j+1})``, build the ribbon between
    ``slant[j]`` and ``slant[j+1]`` by bipartite-zip triangulation:
    at each step advance whichever slant pointer yields the shorter
@@ -21,17 +34,25 @@ Approach: per-UB-vert slant + bipartite-zip ribbon strip
    ``--repair`` to feed those holes to MeshLab's ``close_holes`` (+
    optional isotropic remesh) afterwards.
 
-Usage::
+Usage (recommended end-to-end recipe for a watertight result)::
 
     LD_LIBRARY_PATH=$CONDA_PREFIX/lib python fill_gap.py \\
         --shell outputs/integrate/<base>_shell.stl \\
         --ub    outputs/integrate/<base>_underbody_trimmed.stl \\
-        --out   outputs/integrate/<base>_gap.stl \\
-        --combined-out outputs/integrate/<base>_combined.stl
+        --out          outputs/integrate/<base>_gap.stl \\
+        --combined-out outputs/integrate/<base>_combined.stl \\
+        --repair --repair-close-holes-max 10000 \\
+        --repair-remesh-mm 6 --repair-remesh-iters 3
 
-    # Optional repair + remesh pass on the combined mesh:
-    #     --repair --repair-close-holes-max 10000
-    #     --repair-remesh-mm 6 --repair-remesh-iters 3
+Minimal usage (ribbon mesh only, no repair, no combined STL)::
+
+    python fill_gap.py \\
+        --shell outputs/integrate/<base>_shell.stl \\
+        --ub    outputs/integrate/<base>_underbody_trimmed.stl \\
+        --out   outputs/integrate/<base>_gap.stl
+
+``LD_LIBRARY_PATH`` is only needed when ``--repair`` is set (PyMeshLab
+wants the conda env's libstdc++).
 """
 from __future__ import annotations
 

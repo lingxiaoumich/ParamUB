@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ParamUB — Gap Fill (shell ↔ UB ribbon strip)</title>
+<link rel="stylesheet" href="_style.css">
+</head>
+<body>
+<main>
+<header>
+  <div class="tag">Post-processor</div>
+  <h1>Gap fill — shell ↔ UB ribbon strip</h1>
+  <p class="subtitle">
+    Triangulate the open ribbon between the upper-body shell rim and the
+    parametric underbody rim. One subdivided slant per UB-rim vert,
+    bipartite-zip ribbons that share slant verts so the UB side comes out
+    watertight; intentional polygon holes on the shell side are passed to
+    an optional MeshLab close_holes + remesh pass.
+  </p>
+</header>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#why">Why this is its own step</a></li>
+    <li><a href="#algo">Algorithm</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="#outputs">Outputs</a></li>
+    <li><a href="#repair">Repair pipeline</a></li>
+    <li><a href="#tuning">Tuning knobs</a></li>
+    <li><a href="#limits">Known limits</a></li>
+  </ul>
+</nav>
+
+<h2 id="why">Why this is its own step</h2>
+<p>
+  After <a href="shell_extract.html"><code>run_shell.py</code></a> peels
+  the upper shell off a reconstructed whole-car mesh and
+  <code>integrate_underbody.py</code> drops in a parametric underbody
+  trimmed to the shell silhouette, the two surfaces meet at a thin
+  open ribbon along the rocker line and around each wheel arch. Shell
+  rim has ~3.7 k boundary verts; UB rim has ~1.9 k. They almost meet
+  in 3-D but the trim leaves an open seam at most points and a wider
+  gap at the wheel arches.
+</p>
+<p>
+  <code>fill_gap.py</code> closes that seam. It is run as the third
+  stage of the pipeline:
+</p>
+<ol>
+  <li><code>run_shell.py</code> → upper shell + meta</li>
+  <li><code>integrate_underbody.py</code> → shell + parametric UB
+    (trimmed) + per-wheel STLs, all in the shell frame</li>
+  <li><strong><code>fill_gap.py</code></strong> → gap-fill ribbons +
+    combined STL of shell + UB + ribbons</li>
+</ol>
+
+<h2 id="algo">Algorithm — shared-slant ribbons + bipartite zip</h2>
+<ol>
+  <li>Extract the longest open boundary of each input mesh. The walker
+    in <code>paramub.shell_recut.find_open_boundary_components</code>
+    is robust to the 21-or-so degree-4 T-junctions the shell rim has
+    around wheelhouse openings.</li>
+  <li>For each UB-rim vert <code>u_j</code>, pick its <em>apex</em>
+    <code>apex_j</code> = the nearest shell-rim vert by 3-D distance,
+    then subdivide the line <code>u_j → apex_j</code> into
+    <code>K_j</code> segments at ~<code>target_edge_mm</code> spacing
+    (default = shell median edge length, typically ~6 mm). The
+    intermediate verts are stored ONCE per slant and reused by both
+    ribbons that touch <code>u_j</code>.</li>
+  <li>For each UB rim edge <code>(u_j, u_{j+1})</code>, triangulate the
+    ribbon between <code>slant[j]</code> and <code>slant[j+1]</code> by
+    bipartite zip — at each step advance whichever slant pointer yields
+    the shorter next diagonal, emitting one triangle per step. The zip
+    handles per-slant K mismatches automatically. Because
+    <code>slant[j]</code> is the right side of ribbon <code>(j-1, j)</code>
+    AND the left side of ribbon <code>(j, j+1)</code>, the two
+    triangles either side of each interior slant edge meet with
+    matching verts ⇒ no wedge holes between ribbons.</li>
+  <li>The resulting gap mesh has two boundary types:
+    <ul>
+      <li>UB-rim edges <code>(u_j, u_{j+1})</code> — shared bit-exact
+        with the UB rim, so concat with UB closes them.</li>
+      <li>Apex-chain edges <code>(apex_j, apex_{j+1})</code> when the
+        two are different shell verts — these are open on the shell
+        side. Combined with the shell-rim arcs between consecutive
+        apices, they form well-shaped polygon holes that
+        <code>close_holes</code> can fill.</li>
+    </ul>
+  </li>
+</ol>
+<div class="callout info">
+  <strong>Why the apex chain misses shell rim verts</strong> — apex
+  selection is nearest-neighbour per UB vert, not a 1-to-1 mapping. With
+  3.7 k shell verts and 1.9 k UB verts, most shell verts are <em>not</em>
+  anyone's nearest. They stay on the shell rim and become part of the
+  shell-side polygon-hole boundary.
+</div>
+
+<h2 id="usage">Usage</h2>
+<pre><code>conda activate paramub
+
+# 1. Just the gap mesh (no combined output, no repair)
+python fill_gap.py \
+    --shell outputs/integrate/&lt;base&gt;_shell.stl \
+    --ub    outputs/integrate/&lt;base&gt;_underbody_trimmed.stl \
+    --out   outputs/integrate/&lt;base&gt;_gap.stl
+
+# 2. Also concatenate shell + UB + gap into a combined STL
+python fill_gap.py \
+    --shell outputs/integrate/&lt;base&gt;_shell.stl \
+    --ub    outputs/integrate/&lt;base&gt;_underbody_trimmed.stl \
+    --out          outputs/integrate/&lt;base&gt;_gap.stl \
+    --combined-out outputs/integrate/&lt;base&gt;_combined.stl
+
+# 3. Combined + MeshLab close_holes + isotropic remesh (needs the
+#    conda env's libstdc++ for PyMeshLab):
+LD_LIBRARY_PATH=$CONDA_PREFIX/lib python fill_gap.py \
+    --shell outputs/integrate/&lt;base&gt;_shell.stl \
+    --ub    outputs/integrate/&lt;base&gt;_underbody_trimmed.stl \
+    --out          outputs/integrate/&lt;base&gt;_gap.stl \
+    --combined-out outputs/integrate/&lt;base&gt;_combined.stl \
+    --repair --repair-close-holes-max 10000 \
+    --repair-remesh-mm 6 --repair-remesh-iters 3
+</code></pre>
+
+<h2 id="outputs">Outputs</h2>
+<table>
+  <thead><tr><th>File</th><th>When</th><th>Contents</th></tr></thead>
+  <tbody>
+    <tr><td><code>&lt;out&gt;</code> (e.g. <code>_gap.stl</code>)</td>
+        <td>always</td>
+        <td>The ribbon mesh alone. Vertex set is
+            <code>[shell rim | UB loop | shared interior slant verts]</code>;
+            shell- and UB-rim positions are bit-exact with the source
+            meshes so they merge cleanly on concat.</td></tr>
+    <tr><td><code>&lt;combined-out&gt;</code> (e.g. <code>_combined.stl</code>)</td>
+        <td><code>--combined-out</code></td>
+        <td>Shell + UB + gap concatenated and run through
+            <code>trimesh.process=True</code> (merges duplicate verts).
+            Has shell- and UB-rim edges closed by the ribbon, with
+            residual open edges only on the apex-chain polygon
+            boundaries on the shell side.</td></tr>
+    <tr><td>(in-place rewrite of <code>&lt;combined-out&gt;</code>)</td>
+        <td><code>--repair</code></td>
+        <td>Repaired combined mesh — merge close verts, fix non-manifold
+            edges, <code>close_holes</code>, optional isotropic remesh,
+            then re-seal.</td></tr>
+  </tbody>
+</table>
+
+<p>Console output reports edge health at each stage so you can see how
+far each step gets, e.g.:</p>
+<pre><code>[ribbons] 1,935 slants  (K min/median/max = 8/17/18)  → 62,658 tris
+[check]   combined: f=1,090,463  open edges=5,093  non-manifold=1,053
+[repair]  final:    f=1,229,742  open=1,327  non-manifold=44   # repair, no remesh
+[repair]  final:    f=1,722,502  open=0      non-manifold=1    # repair + remesh 6 mm
+</code></pre>
+
+<h2 id="repair">Repair pipeline</h2>
+<p>
+  <code>--repair</code> drives PyMeshLab's
+  <code>meshing_merge_close_vertices → meshing_repair_non_manifold_edges
+  → meshing_close_holes</code> on the combined mesh. Optionally
+  followed by <code>meshing_isotropic_explicit_remeshing</code> (when
+  <code>--repair-remesh-mm &gt; 0</code>) and a final non-manifold +
+  close_holes re-seal to clean up edges the remesher opens.
+</p>
+<p>
+  The close_holes triangulator (Liepa's min-weight DP from vcglib) fans
+  each closed boundary loop. On the well-shaped shell-side polygon
+  holes it produces a tidy fan; on a fan-pivot region it can leave a
+  visible radial pattern. Running with <code>--repair-remesh-mm 6</code>
+  isotropically rebuilds those triangles to match the shell density and
+  hides the fan.
+</p>
+<p>
+  Recommended one-shot recipe for a watertight result:
+</p>
+<pre><code>LD_LIBRARY_PATH=$CONDA_PREFIX/lib python fill_gap.py \
+    --shell outputs/integrate/&lt;base&gt;_shell.stl \
+    --ub    outputs/integrate/&lt;base&gt;_underbody_trimmed.stl \
+    --out          outputs/integrate/&lt;base&gt;_gap.stl \
+    --combined-out outputs/integrate/&lt;base&gt;_combined.stl \
+    --repair --repair-close-holes-max 10000 \
+    --repair-remesh-mm 6 --repair-remesh-iters 3
+</code></pre>
+
+<h2 id="tuning">Tuning knobs</h2>
+<table>
+  <thead><tr><th>flag</th><th class="num">default</th><th>meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>--ribbon-target-mm</code></td>
+        <td class="num">0 (auto)</td>
+        <td>Spoke-axis subdivision target edge length. 0 ⇒ auto from
+            shell median edge length. Lower ⇒ denser ribbon, smaller
+            triangles, finer fit; higher ⇒ coarser ribbon, less RAM.</td></tr>
+    <tr><td><code>--repair-close-holes-max</code></td>
+        <td class="num">10000</td>
+        <td>Max number of boundary edges per loop that MeshLab will
+            attempt to close. The shell-side polygon holes here have
+            up to a few hundred verts each, so 10 000 is plenty of
+            headroom.</td></tr>
+    <tr><td><code>--repair-remesh-mm</code></td>
+        <td class="num">0 (off)</td>
+        <td>Isotropic remesh target edge length (mm). 0 = no remesh.
+            6 mm matches the typical shell density and is the
+            recommended default when remeshing.</td></tr>
+    <tr><td><code>--repair-remesh-iters</code></td>
+        <td class="num">3</td>
+        <td>Number of explicit isotropic-remesh iterations. 3 is enough
+            to fan-break a close_holes patch and even out triangle
+            sizes; more (up to ~6) gives a slightly smoother result at
+            roughly linear cost.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="limits">Known limits</h2>
+<ul>
+  <li><strong>Apex sharing creates non-manifold edges.</strong> When
+    many consecutive UB verts pick the same shell vert as their nearest
+    (common in tight wheel-arch corners), several ribbons converge at
+    one apex and the edges meeting at the apex have &gt;2 incident
+    faces. Variant-G (repair + remesh) typically reduces these to 1
+    non-manifold edge across the whole car; <code>pymeshlab</code>
+    cannot fully eliminate them without re-splitting verts. If the
+    downstream consumer needs a strict 2-manifold solid, follow up with
+    <code>trimesh.repair.fix_normals</code> +
+    <code>pymeshlab.meshing_repair_non_manifold_edges(method=1)</code>
+    (split mode) to duplicate the offending vertices.</li>
+  <li><strong>Close_holes fans</strong> can produce a long thin sliver
+    triangulation on highly non-convex polygon holes. The optional
+    isotropic remesh hides this; without it the fan is visible.</li>
+  <li><strong>Inconsistent winding.</strong> The bipartite-zip emits
+    ribbon triangles in zip order, not necessarily aligned with the
+    shell/UB outward normals. Add <code>trimesh.repair.fix_normals</code>
+    downstream if you need consistent winding.</li>
+</ul>
+
+<footer>ParamUB — see <code>fill_gap.py</code> for source.</footer>
+</main>
+</body>
+</html>

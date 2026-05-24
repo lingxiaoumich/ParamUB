@@ -210,39 +210,95 @@ edge = cubic_bezier_from_tangents(
       front splitter + rear diffuser as Bezier lofts</li>
 </ul>
 
-<h2>Upper-shell extraction</h2>
+<h2 id="reconstruction-pipeline">Reconstructed-car pipeline (end to end)</h2>
 <p>
   If you start from a reconstructed whole-car mesh (UltraShape /
-  Hunyuan3D) and want to drop in this generator's parametric underbody,
-  run the seven-step shell-extraction pipeline first to strip wheels,
-  wheelhouses, and underbody:
+  Hunyuan3D) and want a watertight body + parametric UB, run the
+  three drivers in order. Each writes into a sibling
+  <code>outputs/</code> subdirectory; the next driver picks up from
+  there.
 </p>
 <pre><code>conda activate paramub
-python run_shell.py --input data/car.stl --output-dir outputs/shell
-# writes outputs/shell/car_final.stl  (single-component upper shell)
-</code></pre>
-<p>See the <a href="shell_extract.html">shell_extract guide</a> for the
-full seven-step walkthrough with per-step renders, the visibility
-classifier, the cut-zone guard, and all tuning knobs.</p>
+BASE=outputs
 
-<h2>Integrating with a reconstructed shell</h2>
-<p>
-  <code>integrate_underbody.py</code> wires the parametric generator to
-  a shell extracted by <code>run_shell.py</code>: it measures the
-  shell's front and rear edges at chosen Y values, anchors a
-  multisection splitter + diffuser to those measurements, generates the
-  underbody at the shell's scale, transforms it into the shell frame,
-  takes the left half, and trims its perimeter to the shell's lower
-  silhouette.
-</p>
-<pre><code>python integrate_underbody.py \
-    --shell-meta outputs/shell/&lt;name&gt;_meta.json \
-    --output-dir outputs/integrate
+# 1. Extract the upper-body shell.
+python run_shell.py \
+    --input data/car.stl \
+    --output-dir $BASE/shell
+# → $BASE/shell/car_final.stl  +  car_meta.json
+
+# 2. Drop in the parametric underbody (anchored splitter + diffuser),
+#    aligned to the shell frame and trimmed to the shell rim.
+LD_LIBRARY_PATH=$CONDA_PREFIX/lib python integrate_underbody.py \
+    --shell-meta $BASE/shell/car_meta.json \
+    --output-dir $BASE/integrate
+# → $BASE/integrate/car_{shell, underbody, underbody_trimmed,
+#                         cut_polygon, wheel_*, integrate_meta}.{stl,json}
+
+# 3. Close the shell ↔ UB rim ribbon and (optionally) repair + remesh
+#    the combined mesh.
+LD_LIBRARY_PATH=$CONDA_PREFIX/lib python fill_gap.py \
+    --shell $BASE/integrate/car_shell.stl \
+    --ub    $BASE/integrate/car_underbody_trimmed.stl \
+    --out          $BASE/integrate/car_gap.stl \
+    --combined-out $BASE/integrate/car_combined.stl \
+    --repair --repair-close-holes-max 10000 \
+    --repair-remesh-mm 6 --repair-remesh-iters 3
+# → $BASE/integrate/car_gap.stl       (ribbon mesh alone)
+# → $BASE/integrate/car_combined.stl  (shell + UB + ribbons, repaired)
 </code></pre>
+<div class="callout info">
+  <code>LD_LIBRARY_PATH=$CONDA_PREFIX/lib</code> is needed wherever
+  PyMeshLab is invoked (step 2's remesh, step 3's
+  <code>--repair</code> pass). Drop it (and pass
+  <code>--no-remesh</code> / omit <code>--repair</code>) to run on the
+  default system Python lib path.
+</div>
+
+<h3 id="shell-extract">Step 1 — shell extraction</h3>
+<p>
+  See the <a href="shell_extract.html">shell_extract guide</a> for the
+  full seven-step walkthrough with per-step renders, the visibility
+  classifier, the cut-zone guard, and all tuning knobs.
+</p>
+
+<h3 id="integrate">Step 2 — integrate parametric UB</h3>
+<p>
+  <code>integrate_underbody.py</code> measures the shell's front and
+  rear edges at chosen Y values, anchors a multisection splitter +
+  diffuser to those measurements, generates the underbody at the
+  shell's scale, transforms it into the shell frame, takes the left
+  half, and trims its perimeter to the shell's lower silhouette.
+</p>
 <p>
   See the docstring of <code>integrate_underbody.py</code> for the full
   pipeline (frame conventions, anchor measurement, spec construction,
   boundary trim).
+</p>
+
+<h3 id="fill-gap">Step 3 — close the shell ↔ UB gap</h3>
+<p>
+  After step 2 the shell and trimmed UB meet at a thin open seam
+  along the rocker line and around each wheel arch.
+  <code>fill_gap.py</code> closes it with shared-slant bipartite-zip
+  ribbons:
+</p>
+<ol>
+  <li>Per UB rim vert, build one subdivided slant to its nearest
+    shell-rim vert at <code>~target_edge_mm</code> spacing
+    (auto-picked from the shell's median edge length, typically ~6 mm).
+    Slant verts are reused by both adjacent ribbons.</li>
+  <li>Per UB rim edge, bipartite-zip the two slants into one triangle
+    per zip step — no wedge holes between ribbons.</li>
+  <li>The shell-side polygon holes (where the apex chain skips shell
+    verts) are sealed by the optional <code>--repair</code> +
+    <code>--repair-remesh-mm</code> pass.</li>
+</ol>
+<p>
+  Recommended one-shot recipe for a watertight result is in the
+  end-to-end snippet above. The <a href="fill_gap.html">fill_gap
+  guide</a> has the algorithm details, all tuning knobs, and known
+  limits.
 </p>
 
 <footer>ParamUB — see <code>paramub/</code> for source. Frozen prototypes live in <code>paramub/debug/</code>.</footer>

@@ -13,15 +13,46 @@
   <p class="subtitle">
     Six builders compose into one car-underbody assembly. Builders 1–2
     feed builder 3 (wheel); builders 4–5 plus four wheels feed builder 6
-    (underbody). A separate <a href="shell_extract.html">shell-extraction</a>
-    pre-processor strips wheels and underbody from a reconstructed
-    whole-car mesh; the <code>integrate_underbody.py</code> driver
-    bridges the two — measures the shell's silhouette, builds a
-    matching parametric underbody (multisection Bezier splitter +
-    diffuser), aligns frames, trims to the shell's perimeter, and
-    writes a combined STL.
+    (underbody). Wrapped around that, a three-stage pipeline turns a
+    reconstructed whole-car mesh into a clean body + UB combination:
+    <a href="shell_extract.html">shell extraction</a> peels the upper
+    body off the input mesh, <code>integrate_underbody.py</code> drops
+    in the parametric underbody and trims it to the shell silhouette,
+    and <a href="fill_gap.html"><code>fill_gap.py</code></a> closes the
+    residual ribbon between the two rims.
   </p>
 </header>
+
+<h2>Full pipeline (reconstructed car → watertight body)</h2>
+<table>
+  <thead><tr><th>#</th><th>Driver</th><th>What it does</th><th>Inputs</th><th>Outputs</th><th>Guide</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>run_shell.py</code></td>
+        <td>Extract upper-body shell from a reconstructed whole-car mesh.
+            Canonicalize axes, remove wheels / wheelhouses / underbody,
+            keep a single connected component.</td>
+        <td><code>data/&lt;car&gt;.stl</code></td>
+        <td><code>outputs/shell/&lt;car&gt;_final.stl</code>,
+            <code>&lt;car&gt;_meta.json</code></td>
+        <td><a href="shell_extract.html">shell_extract.html</a></td></tr>
+    <tr><td>2</td><td><code>integrate_underbody.py</code></td>
+        <td>Measure the shell's silhouette, build a matching parametric
+            underbody (multisection Bezier splitter + diffuser), align
+            frames, trim UB to the shell's lower rim.</td>
+        <td><code>outputs/shell/&lt;car&gt;_meta.json</code></td>
+        <td><code>outputs/integrate/&lt;car&gt;_{shell, underbody,
+            underbody_trimmed, wheel_*, cut_polygon, integrate_meta}</code></td>
+        <td><a href="userguide.html#integrate">userguide.html#integrate</a></td></tr>
+    <tr><td>3</td><td><code>fill_gap.py</code></td>
+        <td>Triangulate the open ribbon between the shell rim and the
+            UB rim with shared-slant bipartite-zip ribbons. Optionally
+            run MeshLab close_holes + isotropic remesh to seal the
+            residual shell-side polygon holes.</td>
+        <td><code>outputs/integrate/&lt;car&gt;_{shell, underbody_trimmed}.stl</code></td>
+        <td><code>outputs/integrate/&lt;car&gt;_{gap, combined}.stl</code></td>
+        <td><a href="fill_gap.html">fill_gap.html</a></td></tr>
+  </tbody>
+</table>
 
 <h2>Shell extraction (pre-processor)</h2>
 <table>
@@ -128,6 +159,43 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
   the default system Python lib path.
 </p>
 
+<h2>Closing the gap — <code>fill_gap.py</code></h2>
+<p>
+  Step 2 leaves an open ribbon between the shell rim
+  (~3.7 k boundary verts around the rocker line and wheel arches) and
+  the UB rim (~1.9 k boundary verts on the underbody's trimmed
+  perimeter). <code>fill_gap.py</code> triangulates that ribbon with
+  shared-slant bipartite-zip ribbons:
+</p>
+<ol>
+  <li>Per UB rim vert <code>u_j</code>: pick its apex shell-rim vert
+    (nearest in 3-D); subdivide the slant <code>u_j → apex_j</code>
+    at ~shell median edge length (~6 mm). Slant verts are stored ONCE
+    and reused by both adjacent ribbons.</li>
+  <li>Per UB rim edge <code>(u_j, u_{j+1})</code>: bipartite-zip
+    <code>slant[j]</code> ↔ <code>slant[j+1]</code> into one
+    triangle per zip step. Shared slant verts ⇒ no wedge holes between
+    ribbons.</li>
+  <li>Combined mesh: shell + UB + ribbons concatenated. UB-side
+    boundary is watertight; the shell side has intentional polygon
+    holes where the apex chain skips over shell-rim arcs.</li>
+  <li>Optional <code>--repair</code> pass: PyMeshLab
+    <code>merge_close_vertices → repair_non_manifold_edges →
+    close_holes (+ optional isotropic remesh)</code> seals those
+    polygon holes. <code>--repair-remesh-mm 6</code> evens out the
+    fan triangulation that <code>close_holes</code> leaves behind.</li>
+</ol>
+<pre><code>LD_LIBRARY_PATH=$CONDA_PREFIX/lib python fill_gap.py \
+    --shell outputs/integrate/&lt;name&gt;_shell.stl \
+    --ub    outputs/integrate/&lt;name&gt;_underbody_trimmed.stl \
+    --out          outputs/integrate/&lt;name&gt;_gap.stl \
+    --combined-out outputs/integrate/&lt;name&gt;_combined.stl \
+    --repair --repair-close-holes-max 10000 \
+    --repair-remesh-mm 6 --repair-remesh-iters 3
+</code></pre>
+<p>See the <a href="fill_gap.html">fill_gap guide</a> for tuning knobs
+and known limits.</p>
+
 <h2>Layout</h2>
 <pre><code>paramub/
 ├── tire_builder.py            # 1 — TireSpec, build_tire
@@ -152,15 +220,19 @@ generate(UnderbodySpec(), output_dir="out", stem="ub", output_mode="all")
 │   ├── floor_builder.html
 │   ├── multisection_diffuser.html  # multisection splitter + diffuser API
 │   ├── shell_extract.html
+│   ├── fill_gap.html              # shared-slant gap-fill ribbons + repair
 │   ├── _style.css
 │   ├── _make_diagrams.py
 │   └── diagrams/                  # builder diagrams + shell/ step renders
 └── debug/                     # frozen prototypes (monolithic earlier versions)
 
-# Repo root
-run_shell.py                   # driver for the shell-extraction pipeline
-integrate_underbody.py         # bridge shell + parametric UB (anchored splitter + diffuser)
-makeUB.py                      # plain example: full-spec UnderbodySpec → generate()
+# Repo root — pipeline drivers run in this order
+run_shell.py                   # 1. driver for the shell-extraction pipeline
+integrate_underbody.py         # 2. bridge shell + parametric UB (anchored splitter + diffuser)
+fill_gap.py                    # 3. close the shell ↔ UB rim ribbon (shared-slant + bipartite zip)
+
+# Plain examples / smoke tests
+makeUB.py                      # full-spec UnderbodySpec → generate()
 makeUB_example.py              # smoke-test driver for multisection / splitter / both / mixed modes
 </code></pre>
 
