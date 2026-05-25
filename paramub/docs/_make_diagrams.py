@@ -437,12 +437,12 @@ def make_wheelhouse_section():
            "sidewall section\n(ride_h → tire_r)", offset=(95, 0))
     _annot(ax, (-arch_r, tire_r + arch_r + 35),
            (arch_r, tire_r + arch_r + 35),
-           f"2 × arch_radius = 2 × (tire_r + axial_clearance)\n"
+           f"2 × arch_radius = 2 × (tire_r + radial_clearance)\n"
            f"          = 2 × {arch_r:.0f}", offset=(0, 22))
-    # axial_clearance — point to the gap between dome and tire on the side
+    # radial_clearance — point to the gap between dome and tire on the side
     gap_x = arch_r * cos(radians(60))
     gap_z = tire_r + arch_r * sin(radians(60))
-    ax.annotate(f"axial_clearance = {s.axial_clearance_mm:.0f}\n"
+    ax.annotate(f"radial_clearance = {s.radial_clearance_mm:.0f}\n"
                 "(tire OD → arch ID)",
                 xy=(gap_x, gap_z),
                 xytext=(-arch_r - 200, tire_r + arch_r * 0.6),

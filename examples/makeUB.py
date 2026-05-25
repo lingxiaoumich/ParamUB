@@ -138,7 +138,7 @@ spec = UnderbodySpec(
     # ],
 
     # ----- wheelhouses ------------------------------------------------
-    wheel_house_axial_clearance_mm   = 30.0,    # tire OD -> arch ID
+    wheel_house_radial_clearance_mm   = 30.0,    # tire OD -> arch ID
     wheel_house_thickness_mm         = 6.0,     # intermediate solid thickness
                                                 # (outer faces extracted; final
                                                 #  output is zero-thickness)

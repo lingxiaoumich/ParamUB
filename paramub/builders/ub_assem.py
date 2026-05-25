@@ -63,7 +63,10 @@ class UnderbodySpec:
         diffuser_radius_mm:      tangent fillet between floor and ramp.
 
     Wheelhouses (per-axle clearances + fillets)
-        wheel_house_axial_clearance_mm:   radial gap tire OD -> arch ID.
+        wheel_house_radial_clearance_mm:  gap tire OD -> arch ID in the
+                                          wheel's plane of rotation
+                                          (i.e. X-Z viewed from the
+                                          side); adds to arch radius.
         wheel_house_thickness_mm:         intermediate shell thickness; the
                                           wheelhouse builder constructs a
                                           solid internally and then extracts
@@ -103,7 +106,7 @@ class UnderbodySpec:
     splitter_sections: Optional[list[SplitterSection]] = None
 
     # wheelhouses
-    wheel_house_axial_clearance_mm: float = 30.0
+    wheel_house_radial_clearance_mm: float = 30.0
     wheel_house_thickness_mm: float = 6.0
     wheel_house_lateral_clearance_mm: float = 35.0
     front_steering_clearance_mm: float = 150.0
@@ -208,7 +211,7 @@ def _make_wheelhouse_specs(spec: UnderbodySpec, layout: dict,
         out.append(WheelhouseSpec(
             axle_x=ax, y_track=yt, side=side,
             tire_radius_mm=tr, tire_width_mm=tw,
-            axial_clearance_mm=spec.wheel_house_axial_clearance_mm,
+            radial_clearance_mm=spec.wheel_house_radial_clearance_mm,
             lateral_clearance_mm=lc,
             thickness_mm=spec.wheel_house_thickness_mm,
             fillet_mm=fr,

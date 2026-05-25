@@ -94,8 +94,12 @@
 <table>
   <thead><tr><th>Parameter</th><th class="num">Default</th><th>Units</th><th>Meaning</th></tr></thead>
   <tbody>
-    <tr><td><code>axial_clearance_mm</code></td><td class="num">30</td><td>mm</td>
-        <td>Radial gap between tire OD and arch ID.</td></tr>
+    <tr><td><code>radial_clearance_mm</code></td><td class="num">30</td><td>mm</td>
+        <td>Gap between tire OD and arch ID in the wheel's plane of
+            rotation (i.e. X-Z viewed from the side). Adds to the
+            arch's <em>radius</em> — the arch is taller and longer
+            front-to-back than the tire by this amount. (Used to be
+            named <code>axial_clearance_mm</code>; that was a misnomer.)</td></tr>
     <tr><td><code>lateral_clearance_mm</code></td><td class="num">35</td><td>mm</td>
         <td>Extra Y per side (includes steering clearance on a front wheel).</td></tr>
     <tr><td><code>thickness_mm</code></td><td class="num">6</td><td>mm</td>
@@ -121,7 +125,7 @@
 <table>
   <thead><tr><th>Property</th><th>Formula</th></tr></thead>
   <tbody>
-    <tr><td><code>arch_radius_mm</code></td><td><code>tire_radius_mm + axial_clearance_mm</code></td></tr>
+    <tr><td><code>arch_radius_mm</code></td><td><code>tire_radius_mm + radial_clearance_mm</code></td></tr>
     <tr><td><code>arch_length_mm</code></td><td><code>tire_width_mm + 2 × lateral_clearance_mm</code></td></tr>
   </tbody>
 </table>

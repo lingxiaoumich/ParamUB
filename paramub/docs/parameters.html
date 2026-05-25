@@ -52,7 +52,7 @@
     <tr><td><strong>Hard-coded</strong></td>
         <td>A literal in <code>integrate_underbody.build_spec()</code>
             that overrides the dataclass default
-            (e.g. <code>wheel_house_axial_clearance_mm=20.0</code>).</td>
+            (e.g. <code>wheel_house_radial_clearance_mm=20.0</code>).</td>
         <td>Edit the literal in
             <code>integrate_underbody.build_spec()</code>; or expose
             it as a CLI flag.</td></tr>
@@ -270,16 +270,13 @@
             <code>build_spec()</code>.</td></tr>
     <tr><td><code>front_angle_deg</code> /
             <code>rear_angle_deg</code> (tangent at P3)</td>
-        <td>Detected (default)</td>
-        <td><strong>Auto-detected per section</strong> from the shell:
-            <code>arctan((anchor_z − ride_height) /
-            |anchor_x − kick_x|)</code>, clamped to [0°, 25°]. For the
-            alfa example: splitter ≈ 5° @ y=0; diffuser ≈ 8° @ y=0.
-            Override with the keyword arguments
-            <code>splitter_front_angle_deg</code> /
-            <code>diffuser_rear_angle_deg</code> in
-            <code>build_spec()</code> (pass a float to force a constant
-            angle instead of detection).</td></tr>
+        <td>Hard-coded (overridable)</td>
+        <td>Splitter default <strong>+30°</strong>, diffuser default
+            <strong>+5°</strong> — the tangent angle the cubic Bezier
+            arrives at P3 (front/rear endpoint). Same value used across
+            all 3 Y sections. CLI:
+            <code>--splitter-angle-deg</code> /
+            <code>--diffuser-angle-deg</code>.</td></tr>
     <tr><td><code>start_strength</code> / <code>end_strength</code></td>
         <td>Hard-coded</td>
         <td><code>handle_strength = 0.30</code> for both pieces (Bezier
@@ -291,50 +288,51 @@
 
 <h2 id="hardcoded">4. Hard-coded constants in <code>integrate_underbody.py</code></h2>
 
-<h3 id="wheelhouse-clearance">Wheelhouse clearance — axial vs lateral vs steering</h3>
+<h3 id="wheelhouse-clearance">Wheelhouse clearance — radial vs lateral vs steering</h3>
 <p>
   Three knobs control the gap between the tire envelope and the arch
-  walls. The naming on one of them is unfortunately misleading; here's
-  what each actually does:
+  walls:
 </p>
 <table>
   <thead>
     <tr><th>Field</th><th>Direction</th><th>Effect</th></tr>
   </thead>
   <tbody>
-    <tr><td><code>wheel_house_axial_clearance_mm</code>
-            <small>(misnomer — see note)</small></td>
+    <tr><td><code>wheel_house_radial_clearance_mm</code></td>
         <td><strong>Radial</strong> (in the X-Z plane, perpendicular to
             the wheel's spin axis — looking at the wheel from the side)</td>
         <td>Arch inner radius = <code>tire_radius + this</code>. Sets
             how much taller/longer the arch is than the tire when
-            viewed from the side. Default <strong>20 mm</strong>.</td></tr>
+            viewed from the side. Default <strong>20 mm</strong>.
+            CLI: <code>--radial-clearance-mm</code>.</td></tr>
     <tr><td><code>wheel_house_lateral_clearance_mm</code></td>
         <td><strong>Lateral</strong> (along Y / vehicle width — the
             wheel's spin axis)</td>
         <td>Arch Y extent = <code>tire_width + 2 × this</code> (each
             side). Sets the sideways gap between tire sidewall and
-            arch wall. Default <strong>25 mm</strong>.</td></tr>
+            arch wall. Default <strong>25 mm</strong>.
+            CLI: <code>--lateral-clearance-mm</code>.</td></tr>
     <tr><td><code>front_steering_clearance_mm</code> /
             <code>rear_steering_clearance_mm</code></td>
         <td><strong>Lateral</strong> (added to lateral on that axle
             only)</td>
         <td>Extra Y room on the front (or rear) arches for steered
-            wheel travel — the tire sidewall sweeps slightly outward
-            when the wheel is turned. <strong>Front default now
-            50 mm</strong> (was 0 — was producing a tire-tight arch
-            that couldn't allow steering). Rear default 0.</td></tr>
+            wheel travel. <strong>Front default 75 mm</strong>
+            (passenger-car typical); rear default 0. CLI:
+            <code>--front-steering-clearance-mm</code> /
+            <code>--rear-steering-clearance-mm</code>.</td></tr>
   </tbody>
 </table>
 <div class="callout info">
-  <strong>The <code>axial_</code> prefix is a misnomer.</strong> In
-  wheel terminology "axial" usually means "along the spin axis"
-  (= lateral here). Reading the field's value, it's actually the
-  <em>radial</em> clearance (in the wheel's plane of rotation, so
-  X-Z in vehicle frame). The internal arch construction uses
-  <code>arch_radius = tire_radius + axial_clearance_mm</code> — so
-  the value adds to the arch's <em>radius</em>, not its lateral
-  extent. Don't let the name fool you.
+  <strong>Renamed:</strong> the field used to be called
+  <code>axial_clearance_mm</code> (and
+  <code>wheel_house_axial_clearance_mm</code> on the UnderbodySpec)
+  but the value is actually <em>radial</em> — it adds to the arch's
+  <em>radius</em>, not its lateral extent. The rename is a public
+  API change: any external callers passing
+  <code>axial_clearance_mm=…</code> or
+  <code>wheel_house_axial_clearance_mm=…</code> need to switch to
+  the <code>radial_</code> form.
 </div>
 
 <h3>Other hard-coded constants</h3>
@@ -345,17 +343,18 @@
   <tbody>
     <tr><td><code>floor_angle_deg</code></td><td class="num">0.0</td>
         <td>Rake about the front edge. Not learned from the shell.</td></tr>
-    <tr><td><code>wheel_house_axial_clearance_mm</code></td>
+    <tr><td><code>wheel_house_radial_clearance_mm</code></td>
         <td class="num">20.0</td>
-        <td>Radial gap (see explanation above).</td></tr>
+        <td>See wheelhouse-clearance explanation above. CLI flag:
+            <code>--radial-clearance-mm</code>.</td></tr>
     <tr><td><code>wheel_house_lateral_clearance_mm</code></td>
         <td class="num">25.0</td>
-        <td>Base Y clearance per side.</td></tr>
+        <td>Base Y clearance per side. CLI flag:
+            <code>--lateral-clearance-mm</code>.</td></tr>
     <tr><td><code>front_steering_clearance_mm</code></td>
-        <td class="num">50.0</td>
-        <td>Extra Y on front arches for steering travel. (Default
-            raised from 0 to 50 so the front arches actually allow
-            steering.)</td></tr>
+        <td class="num">75.0</td>
+        <td>Extra Y on front arches for steering travel. CLI flag:
+            <code>--front-steering-clearance-mm</code>.</td></tr>
     <tr><td><code>rear_steering_clearance_mm</code></td>
         <td class="num">0.0</td>
         <td>Extra Y on rear arches.</td></tr>
@@ -411,6 +410,26 @@
         <td><code>integrate_underbody.py</code></td>
         <td>Shrink the cut polygon by this many mm before trimming
             (default 100). Larger = more UB stays inside the rim.</td></tr>
+    <tr><td><code>--splitter-angle-deg</code> /
+            <code>--diffuser-angle-deg</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>P3-tangent angles of the splitter / diffuser cubic Bezier.
+            Defaults <strong>30°</strong> / <strong>5°</strong>.</td></tr>
+    <tr><td><code>--radial-clearance-mm</code> /
+            <code>--lateral-clearance-mm</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>Wheelhouse base clearances. Defaults
+            <strong>20</strong> / <strong>25 mm</strong>.</td></tr>
+    <tr><td><code>--front-steering-clearance-mm</code> /
+            <code>--rear-steering-clearance-mm</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>Extra Y on front / rear arches for steered wheel travel.
+            Defaults <strong>75</strong> / <strong>0 mm</strong>.</td></tr>
+    <tr><td><code>--front-fillet-mm</code> /
+            <code>--rear-fillet-mm</code></td>
+        <td><code>integrate_underbody.py</code></td>
+        <td>Inboard fillet radius per axle. Default
+            <strong>100 mm</strong> each.</td></tr>
     <tr><td><code>--depth</code> /
             <code>--max-nm-passes</code> /
             <code>--no-symmetrize</code> /
@@ -456,12 +475,12 @@
     want to set <code>TARGET_WHEELBASE_MM</code> per car or skip the
     rescale.</li>
   <li><strong>Wheelhouse clearances.</strong>
-    The hard-coded
-    <code>axial_clearance_mm = 20</code> and
+    Defaults <code>radial_clearance_mm = 20</code> and
     <code>lateral_clearance_mm = 25</code> work for typical passenger
-    cars. SUVs / off-road may want more axial; track cars may want
-    less. Exposing as CLI flags is easy (one-line argparse + thread
-    through <code>build_spec()</code>).</li>
+    cars. SUVs / off-road may want more radial clearance; track cars
+    may want less. Override via
+    <code>--radial-clearance-mm</code> / <code>--lateral-clearance-mm</code>
+    (no code edit needed).</li>
   <li><strong>Splitter / diffuser angles.</strong>
     Now <strong>auto-detected per section</strong> from the shell
     anchors (the slope from kick to the shell front/rear edge),

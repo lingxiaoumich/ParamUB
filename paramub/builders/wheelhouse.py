@@ -47,9 +47,20 @@ class WheelhouseSpec:
         tire_width_mm:       tire axial width (section width).
 
     Clearances
-        axial_clearance_mm:  radial gap between tire OD and arch inner wall.
-        lateral_clearance_mm: extra Y per side (includes steering clearance
-                              on a front wheel).
+        radial_clearance_mm: gap between tire OD and arch inner wall, in
+                              the wheel's plane of rotation (i.e. in the
+                              X-Z plane viewed from the side). Adds to
+                              the arch's *radius*, so the arch is taller
+                              and longer (front-to-back) than the tire
+                              by this amount.
+                              (Used to be named ``axial_clearance_mm``;
+                              that was a misnomer — the value is along
+                              the radial direction, not the wheel's spin
+                              axis.)
+        lateral_clearance_mm: extra Y per side along the wheel's spin
+                              axis (= sideways in vehicle frame).
+                              Includes steering clearance on a front
+                              wheel.
         thickness_mm:        intermediate shell thickness; only used inside
                               the wheelhouse solid construction (the final
                               surface-mode output is zero-thickness, with
@@ -71,7 +82,7 @@ class WheelhouseSpec:
     tire_radius_mm: float
     tire_width_mm: float
 
-    axial_clearance_mm: float = 30.0
+    radial_clearance_mm: float = 30.0
     lateral_clearance_mm: float = 35.0
     thickness_mm: float = 6.0
     fillet_mm: float = 100.0
@@ -90,7 +101,7 @@ class WheelhouseSpec:
     # ----- derived -----
     @property
     def arch_radius_mm(self) -> float:
-        return self.tire_radius_mm + self.axial_clearance_mm
+        return self.tire_radius_mm + self.radial_clearance_mm
 
     @property
     def arch_length_mm(self) -> float:

@@ -329,13 +329,15 @@ def build_spec(hints: dict, anchors: dict,
                 width_extend_mm: float = 100.0,
                 splitter_kick_offset_mm: float = 50.0,
                 diffuser_kick_offset_mm: float = 50.0,
-                splitter_front_angle_deg: float | None = None,
-                diffuser_rear_angle_deg: float | None = None,
+                splitter_front_angle_deg: float = 30.0,
+                diffuser_rear_angle_deg: float = 5.0,
                 handle_strength: float = 0.30,
-                front_steering_clearance_mm: float = 50.0,
+                front_steering_clearance_mm: float = 75.0,
                 rear_steering_clearance_mm: float = 0.0,
                 front_wheel_house_fillet_mm: float = 100.0,
-                rear_wheel_house_fillet_mm: float = 100.0):
+                rear_wheel_house_fillet_mm: float = 100.0,
+                radial_clearance_mm: float = 20.0,
+                lateral_clearance_mm: float = 25.0):
     """Build an UnderbodySpec with multisection splitter + diffuser
     Bezier lofts pinned to the shell's measured front/rear edges.
 
@@ -435,42 +437,19 @@ def build_spec(hints: dict, anchors: dict,
                   f"(request would dip P2 below floor)")
         return min(request, max_safe)
 
-    def _detect_angle(end_x: float, end_z: float, kick_x: float,
-                       label: str, y_mm: float) -> float:
-        """Detect the splitter/diffuser front/rear angle from the shell
-        anchor. Angle = arctan(rise / run) where rise is from ride_h to
-        the anchor z and run is the |x| from kick to anchor. Clamped to
-        [0°, 25°] for safety (the Bezier can't render negative tangents
-        cleanly and very steep angles can self-intersect)."""
-        import math
-        rise = max(0.0, end_z - ride_h)
-        run = abs(end_x - kick_x)
-        if run < 1e-3:
-            return 0.0
-        angle = math.degrees(math.atan2(rise, run))
-        clamped = max(0.0, min(25.0, angle))
-        print(f"[angle-detect] {label} Y={y_mm:.0f}: "
-              f"rise={rise:.0f} run={run:.0f}  "
-              f"→ {angle:.1f}° (clamped {clamped:.1f}°)")
-        return clamped
-
     def splitter_at(y_anchor: float, y_mm: float) -> SplitterSection:
         a = anchors[y_anchor]
         front_x = shell_x_to_paramub_x(a["front_x_shell"]) + length_extend_mm
-        angle = (_detect_angle(front_x, a["front_z_shell"], splitter_kick_x,
-                                 "splitter", y_mm)
-                 if splitter_front_angle_deg is None
-                 else splitter_front_angle_deg)
         end_str = _safe_end_strength(
             front_x, a["front_z_shell"], splitter_kick_x,
-            angle, handle_strength,
+            splitter_front_angle_deg, handle_strength,
             "splitter", y_mm)
         return SplitterSection(
             y_mm=y_mm,
             kick_x_mm=splitter_kick_x,
             front_x_mm=front_x,
             front_z_mm=a["front_z_shell"],
-            front_angle_deg=angle,
+            front_angle_deg=splitter_front_angle_deg,
             start_strength=handle_strength,
             end_strength=end_str,
         )
@@ -478,22 +457,18 @@ def build_spec(hints: dict, anchors: dict,
     def diffuser_at(y_anchor: float, y_mm: float) -> DiffuserSection:
         a = anchors[y_anchor]
         rear_x = shell_x_to_paramub_x(a["rear_x_shell"]) - length_extend_mm
-        angle = (_detect_angle(rear_x, a["rear_z_shell"], diffuser_kick_x,
-                                 "diffuser", y_mm)
-                 if diffuser_rear_angle_deg is None
-                 else diffuser_rear_angle_deg)
         # _safe_end_strength uses |end_x − kick_x| via hypot, so it works
         # for either direction (diffuser kick > rear, splitter kick < front).
         end_str = _safe_end_strength(
             rear_x, a["rear_z_shell"], diffuser_kick_x,
-            angle, handle_strength,
+            diffuser_rear_angle_deg, handle_strength,
             "diffuser", y_mm)
         return DiffuserSection(
             y_mm=y_mm,
             kick_x_mm=diffuser_kick_x,
             rear_x_mm=rear_x,
             rear_z_mm=a["rear_z_shell"],
-            rear_angle_deg=angle,
+            rear_angle_deg=diffuser_rear_angle_deg,
             start_strength=handle_strength,
             end_strength=end_str,
         )
@@ -519,8 +494,8 @@ def build_spec(hints: dict, anchors: dict,
         floor_width_mm=floor_width,
         splitter_sections=splitter_sections,
         diffuser_sections=diffuser_sections,
-        wheel_house_axial_clearance_mm=20.0,
-        wheel_house_lateral_clearance_mm=25.0,
+        wheel_house_radial_clearance_mm=radial_clearance_mm,
+        wheel_house_lateral_clearance_mm=lateral_clearance_mm,
         front_steering_clearance_mm=front_steering_clearance_mm,
         rear_steering_clearance_mm=rear_steering_clearance_mm,
         front_wheel_house_fillet_mm=front_wheel_house_fillet_mm,
@@ -858,6 +833,35 @@ def parse_args():
                         "meshing_isotropic_explicit_remeshing.")
     p.add_argument("--no-remesh", action="store_true",
                    help="Skip the remesh-to-shell-density pass.")
+
+    # Per-car parametric-UB knobs (forwarded to build_spec()).
+    p.add_argument("--splitter-angle-deg", type=float, default=30.0,
+                   help="Splitter front-edge tangent angle (P3 tangent "
+                        "of the cubic Bezier). Default 30°.")
+    p.add_argument("--diffuser-angle-deg", type=float, default=5.0,
+                   help="Diffuser rear-edge tangent angle (P3 tangent "
+                        "of the cubic Bezier). Default 5°.")
+    p.add_argument("--front-steering-clearance-mm", type=float,
+                   default=75.0,
+                   help="Extra Y room on front arches for steered wheel "
+                        "travel. Default 75 mm (passenger-car typical).")
+    p.add_argument("--rear-steering-clearance-mm", type=float, default=0.0,
+                   help="Extra Y room on rear arches. Default 0.")
+    p.add_argument("--radial-clearance-mm", type=float, default=20.0,
+                   help="Wheelhouse radial gap (tire OD → arch ID, in "
+                        "the wheel's plane of rotation). Default 20 mm. "
+                        "Adds to the arch RADIUS — arch is taller and "
+                        "longer (front-back) than the tire by this much.")
+    p.add_argument("--lateral-clearance-mm", type=float, default=25.0,
+                   help="Wheelhouse base lateral clearance per side "
+                        "(along wheel spin axis = Y). Default 25 mm. "
+                        "Steering clearances are added on top.")
+    p.add_argument("--front-fillet-mm", type=float, default=100.0,
+                   help="Front wheelhouse inboard fillet radius (mm). "
+                        "Default 100.")
+    p.add_argument("--rear-fillet-mm", type=float, default=100.0,
+                   help="Rear wheelhouse inboard fillet radius (mm). "
+                        "Default 100.")
     return p.parse_args()
 
 
@@ -903,7 +907,15 @@ def main():
     lat_overrides = lateral_clearance_overrides(hints, extra_extend_mm=100.0)
     spec = build_spec(hints, anchors, lat_overrides=lat_overrides,
                        y_intermediate_splitter=y_int_splitter,
-                       y_intermediate_diffuser=y_int_diffuser)
+                       y_intermediate_diffuser=y_int_diffuser,
+                       splitter_front_angle_deg=args.splitter_angle_deg,
+                       diffuser_rear_angle_deg=args.diffuser_angle_deg,
+                       front_steering_clearance_mm=args.front_steering_clearance_mm,
+                       rear_steering_clearance_mm=args.rear_steering_clearance_mm,
+                       front_wheel_house_fillet_mm=args.front_fillet_mm,
+                       rear_wheel_house_fillet_mm=args.rear_fillet_mm,
+                       radial_clearance_mm=args.radial_clearance_mm,
+                       lateral_clearance_mm=args.lateral_clearance_mm)
 
     midpoint_x = hints["midpoint_x_shell_mm"]
     if spec.splitter_sections:

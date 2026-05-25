@@ -87,7 +87,7 @@ def _extract_geometry(integrate_meta: dict, wheels_dir: Path,
         "wheelhouses": {
             "front_top_z_mm": (hints.get("wheelhouse_top_mm") or {}).get("front"),
             "rear_top_z_mm": (hints.get("wheelhouse_top_mm") or {}).get("rear"),
-            "axial_clearance_mm": spec.get("wheel_house_axial_clearance_mm"),
+            "radial_clearance_mm": spec.get("wheel_house_radial_clearance_mm"),
             "lateral_clearance_mm": spec.get("wheel_house_lateral_clearance_mm"),
             "thickness_mm": spec.get("wheel_house_thickness_mm"),
             "front_steering_clearance_mm": spec.get("front_steering_clearance_mm"),
