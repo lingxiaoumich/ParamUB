@@ -245,11 +245,12 @@ def pymeshlab_repair(combined_mesh,
     effective_close_holes_max = close_holes_max
     if (close_holes_max > 0
             and in_open > close_holes_open_edge_guard):
-        effective_close_holes_max = min(close_holes_max, 200)
+        effective_close_holes_max = 0
         print(f"[repair] open_edges {in_open:,} > guard "
-              f"{close_holes_open_edge_guard:,} — capping "
-              f"close_holes maxholesize {close_holes_max} → "
-              f"{effective_close_holes_max} to avoid O(n³) DP hang")
+              f"{close_holes_open_edge_guard:,} — SKIPPING close_holes "
+              f"entirely (capping maxholesize wasn't enough; cumulative "
+              f"DP cost across many small holes still hangs). Stage 4's "
+              f"voxel remesh will close the remaining holes.")
 
     try:
         ms.meshing_merge_close_vertices(
