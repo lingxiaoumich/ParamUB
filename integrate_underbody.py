@@ -826,15 +826,20 @@ def parse_args():
                         "— matches paramub.generate's floor default. "
                         "Lower = smoother diffuser/splitter curves at "
                         "the cost of more triangles.")
-    p.add_argument("--ub-stl-tolerance-mm", type=float, default=0.05,
+    p.add_argument("--ub-stl-tolerance-mm", type=float, default=0.1,
                    help="Linear STL chord tolerance for the RAW underbody "
-                        "+ wheel exports (before BREP trim). Default 0.05 mm.")
-    p.add_argument("--ub-stl-angular-tolerance-rad", type=float, default=0.02,
+                        "+ wheel exports (before BREP trim). Default 0.1 mm "
+                        "— the raw underbody is only used for bounds and is "
+                        "re-tessellated by the BREP trim, and the wheels are "
+                        "hidden inside wheelhouses, so coarse is fine here.")
+    p.add_argument("--ub-stl-angular-tolerance-rad", type=float, default=0.1,
                    help="Angular STL chord tolerance for the RAW underbody "
-                        "+ wheel exports (before BREP trim). Default 0.02 rad. "
-                        "Lower = smoother curves; sets the upper bound on "
-                        "the diffuser/splitter facet density that downstream "
-                        "remeshes can refine.")
+                        "+ wheel exports. Default 0.1 rad (~5.7°). Lower "
+                        "values exploded stage-2 wallclock (~30+ min on "
+                        "the wheels' booleaned spoke cutouts) for no "
+                        "visible benefit — final splitter/diffuser "
+                        "smoothness is controlled by "
+                        "--cut-stl-angular-tolerance-rad, not this flag.")
     p.add_argument("--remesh-target-mm", type=float, default=None,
                    help="Target edge length (mm) for the pymeshlab "
                         "isotropic remesh of the trimmed underbody. "
