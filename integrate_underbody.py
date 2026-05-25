@@ -550,8 +550,8 @@ def subdivide_to_edge(mesh: trimesh.Trimesh, max_edge: float) -> trimesh.Trimesh
 
 
 def cq_obj_to_trimesh_via_stl(cq_obj, stl_tmp: Path,
-                               tolerance: float = 0.1,
-                               angular_tolerance: float = 0.1
+                               tolerance: float = 0.05,
+                               angular_tolerance: float = 0.02
                                ) -> trimesh.Trimesh:
     """Export a single CadQuery object (Workplane / Shape / Assembly child
     ``.obj``) to STL and load as trimesh. Wraps it in a one-child
@@ -820,9 +820,21 @@ def parse_args():
                         "(0.1) so the new cut boundary tessellates "
                         "smoothly.")
     p.add_argument("--cut-stl-angular-tolerance-rad", type=float,
-                   default=0.05,
+                   default=0.02,
                    help="Angular STL chord tolerance for the trimmed "
-                        "underbody.")
+                        "underbody (radians). Default 0.02 rad ≈ 1.1° "
+                        "— matches paramub.generate's floor default. "
+                        "Lower = smoother diffuser/splitter curves at "
+                        "the cost of more triangles.")
+    p.add_argument("--ub-stl-tolerance-mm", type=float, default=0.05,
+                   help="Linear STL chord tolerance for the RAW underbody "
+                        "+ wheel exports (before BREP trim). Default 0.05 mm.")
+    p.add_argument("--ub-stl-angular-tolerance-rad", type=float, default=0.02,
+                   help="Angular STL chord tolerance for the RAW underbody "
+                        "+ wheel exports (before BREP trim). Default 0.02 rad. "
+                        "Lower = smoother curves; sets the upper bound on "
+                        "the diffuser/splitter facet density that downstream "
+                        "remeshes can refine.")
     p.add_argument("--remesh-target-mm", type=float, default=None,
                    help="Target edge length (mm) for the pymeshlab "
                         "isotropic remesh of the trimmed underbody. "
@@ -957,7 +969,10 @@ def main():
     # ---- body: align only (no slice, no trim, no subdivide) ------------
     # subdivide_to_edge was only needed for the boundary trim, which has
     # been removed.
-    underbody_raw = cq_obj_to_trimesh_via_stl(underbody_cq, scratch / "body_paramub.stl")
+    underbody_raw = cq_obj_to_trimesh_via_stl(
+        underbody_cq, scratch / "body_paramub.stl",
+        tolerance=args.ub_stl_tolerance_mm,
+        angular_tolerance=args.ub_stl_angular_tolerance_rad)
     print(f"[underbody raw] faces={len(underbody_raw.faces):,}")
     underbody_aligned = align_to_shell_frame(underbody_raw, midpoint_x)
     print(f"[underbody aligned] faces={len(underbody_aligned.faces):,}  "
@@ -968,7 +983,9 @@ def main():
     wheel_meshes: dict[str, trimesh.Trimesh] = {}
     for name, cq_obj in wheels_cq.items():
         w_raw = cq_obj_to_trimesh_via_stl(
-            cq_obj, scratch / f"{name}_paramub.stl")
+            cq_obj, scratch / f"{name}_paramub.stl",
+            tolerance=args.ub_stl_tolerance_mm,
+            angular_tolerance=args.ub_stl_angular_tolerance_rad)
         wheel_meshes[name] = align_to_shell_frame(w_raw, midpoint_x)
         print(f"[wheel] {name:<10s} faces={len(wheel_meshes[name].faces):,}")
 

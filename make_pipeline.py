@@ -176,11 +176,18 @@ def main():
             f"started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
         py = sys.executable
+        # -u forces unbuffered stdout/stderr so the per-stage log
+        # streams line-by-line into both the per-stage file AND the
+        # tee'd master log. Without it Python block-buffers stdout
+        # when it isn't a tty, and the log can sit empty for tens of
+        # minutes while the subprocess silently chews on a big
+        # tessellation pass.
+        py_unbuf = [py, "-u"]
 
         if not args.skip_shell:
             ok = run_stage(
                 "shell extraction (run_shell.py)", 1, "run_shell",
-                [py, "run_shell.py",
+                py_unbuf + ["run_shell.py",
                  "--input", str(args.input),
                  "--output-dir", str(args.shell_dir)],
                 base, logs_dir, master_log)
@@ -191,7 +198,7 @@ def main():
             ok = run_stage(
                 "integrate parametric UB (integrate_underbody.py)",
                 2, "integrate",
-                [py, "integrate_underbody.py",
+                py_unbuf + ["integrate_underbody.py",
                  "--shell-meta",
                  str(args.shell_dir / f"{base}_meta.json"),
                  "--output-dir", str(args.integrate_dir)],
@@ -202,7 +209,7 @@ def main():
         if not args.skip_fillgap:
             ok = run_stage(
                 "fill shell ↔ UB rim gap (fill_gap.py)", 3, "fill_gap",
-                [py, "fill_gap.py",
+                py_unbuf + ["fill_gap.py",
                  "--shell",
                  str(args.integrate_dir / f"{base}_shell.stl"),
                  "--ub",
@@ -222,7 +229,7 @@ def main():
             ok = run_stage(
                 "watertight finisher (make_watertight.py)",
                 4, "watertight",
-                [py, "make_watertight.py",
+                py_unbuf + ["make_watertight.py",
                  "--input",
                  str(args.integrate_dir / f"{base}_combined.stl"),
                  "--output",
