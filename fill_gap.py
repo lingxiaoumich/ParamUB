@@ -206,7 +206,8 @@ def pymeshlab_repair(combined_mesh,
                        close_holes_max: int = 10000,
                        remesh_target_mm: float = 0.0,
                        remesh_iterations: int = 3,
-                       scratch_dir: Path | None = None):
+                       scratch_dir: Path | None = None,
+                       close_holes_open_edge_guard: int = 5000):
     """Repair the combined mesh: merge close verts, fix non-manifold
     edges, close_holes, optionally isotropic remesh + re-seal.
 
@@ -215,6 +216,14 @@ def pymeshlab_repair(combined_mesh,
     self-touching — adjacency artifacts at apex-sharing points can
     confuse it. The intentional polygon holes on the shell side are
     well-shaped and usually fill cleanly.
+
+    The DP is O(n³) per hole, so a single large hole on a pathological
+    reconstruction (many thousands of open edges) hangs the call for
+    hours. When the input open-edge count exceeds
+    ``close_holes_open_edge_guard``, the maxholesize is auto-capped to
+    a small value (200) so the DP only attempts well-shaped small
+    holes; any genuinely large pathological holes are left for the
+    downstream stage-4 voxel remesh to close.
     """
     import pymeshlab
     import trimesh
@@ -224,9 +233,23 @@ def pymeshlab_repair(combined_mesh,
     dst = scratch_dir / "repair_out.stl"
     combined_mesh.export(str(src), file_type="stl")
 
+    in_edges = combined_mesh.edges_sorted
+    _, in_counts = np.unique(in_edges, axis=0, return_counts=True)
+    in_open = int((in_counts == 1).sum())
+
     ms = pymeshlab.MeshSet()
     ms.load_new_mesh(str(src))
-    print(f"[repair] in: {ms.current_mesh().face_number():,} tris")
+    print(f"[repair] in: {ms.current_mesh().face_number():,} tris  "
+          f"open_edges={in_open:,}")
+
+    effective_close_holes_max = close_holes_max
+    if (close_holes_max > 0
+            and in_open > close_holes_open_edge_guard):
+        effective_close_holes_max = min(close_holes_max, 200)
+        print(f"[repair] open_edges {in_open:,} > guard "
+              f"{close_holes_open_edge_guard:,} — capping "
+              f"close_holes maxholesize {close_holes_max} → "
+              f"{effective_close_holes_max} to avoid O(n³) DP hang")
 
     try:
         ms.meshing_merge_close_vertices(
@@ -243,12 +266,12 @@ def pymeshlab_repair(combined_mesh,
     except Exception as exc:
         print(f"[repair] non-manifold repair skipped: {exc}")
 
-    if close_holes_max > 0:
+    if effective_close_holes_max > 0:
         try:
             ms.meshing_close_holes(
-                maxholesize=close_holes_max,
+                maxholesize=effective_close_holes_max,
                 selfintersection=False)
-            print(f"[repair] close_holes(max={close_holes_max}): "
+            print(f"[repair] close_holes(max={effective_close_holes_max}): "
                   f"{ms.current_mesh().face_number():,} tris")
         except Exception as exc:
             print(f"[repair] close_holes skipped: {exc}")
@@ -268,7 +291,7 @@ def pymeshlab_repair(combined_mesh,
         try:
             ms.meshing_repair_non_manifold_edges(method=0)
             ms.meshing_close_holes(
-                maxholesize=close_holes_max,
+                maxholesize=effective_close_holes_max,
                 selfintersection=False)
             print(f"[repair] post-remesh re-seal: "
                   f"{ms.current_mesh().face_number():,} tris")

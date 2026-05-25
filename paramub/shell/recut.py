@@ -182,15 +182,28 @@ def find_open_boundary_loops(mesh):
 
 def export_edges_as_tubes(mesh, edges: np.ndarray, out_path,
                             radius_rel: float = 0.001,
-                            sections: int = 4) -> int:
+                            sections: int = 4,
+                            max_edges: int = 20000) -> int:
     """Visualize a set of boundary edges as a tube-mesh STL.
 
     ``radius_rel`` is a fraction of the mesh diagonal.
     Returns the number of edges drawn.
+
+    ``edges_to_tube_mesh`` builds one cylinder per edge in a Python
+    loop and then ``trimesh.util.concatenate`` resizes arrays per
+    call → O(n²) in edge count. On pathological reconstructions
+    (30K+ open edges) this hangs for hours. Skip when the count
+    blows past ``max_edges`` — this output is purely diagnostic and
+    is never read back by downstream stages.
     """
     import numpy as np
     from .extract import edges_to_tube_mesh
     if len(edges) == 0:
+        return 0
+    if len(edges) > max_edges:
+        print(f"[tube-viz] skipping {out_path.name}: "
+              f"{len(edges):,} edges > max_edges={max_edges:,} "
+              f"(O(n²) cylinder concat would hang)")
         return 0
     diag = float(np.linalg.norm(mesh.bounds[1] - mesh.bounds[0]))
     radius = radius_rel * diag
