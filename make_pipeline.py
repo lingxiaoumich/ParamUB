@@ -91,6 +91,7 @@ def run_stage(label: str, stage_n: int, stage_name: str,
             sys.stdout.write(line)
             sys.stdout.flush()
             stage_log.write(line)
+            stage_log.flush()
             master_log.write(line)
             master_log.flush()
         rc = proc.wait()
