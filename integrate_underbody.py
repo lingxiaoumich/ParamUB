@@ -329,9 +329,13 @@ def build_spec(hints: dict, anchors: dict,
                 width_extend_mm: float = 100.0,
                 splitter_kick_offset_mm: float = 50.0,
                 diffuser_kick_offset_mm: float = 50.0,
-                splitter_front_angle_deg: float = +30.0,
-                diffuser_rear_angle_deg: float = 5.0,
-                handle_strength: float = 0.30):
+                splitter_front_angle_deg: float | None = None,
+                diffuser_rear_angle_deg: float | None = None,
+                handle_strength: float = 0.30,
+                front_steering_clearance_mm: float = 50.0,
+                rear_steering_clearance_mm: float = 0.0,
+                front_wheel_house_fillet_mm: float = 100.0,
+                rear_wheel_house_fillet_mm: float = 100.0):
     """Build an UnderbodySpec with multisection splitter + diffuser
     Bezier lofts pinned to the shell's measured front/rear edges.
 
@@ -431,19 +435,42 @@ def build_spec(hints: dict, anchors: dict,
                   f"(request would dip P2 below floor)")
         return min(request, max_safe)
 
+    def _detect_angle(end_x: float, end_z: float, kick_x: float,
+                       label: str, y_mm: float) -> float:
+        """Detect the splitter/diffuser front/rear angle from the shell
+        anchor. Angle = arctan(rise / run) where rise is from ride_h to
+        the anchor z and run is the |x| from kick to anchor. Clamped to
+        [0°, 25°] for safety (the Bezier can't render negative tangents
+        cleanly and very steep angles can self-intersect)."""
+        import math
+        rise = max(0.0, end_z - ride_h)
+        run = abs(end_x - kick_x)
+        if run < 1e-3:
+            return 0.0
+        angle = math.degrees(math.atan2(rise, run))
+        clamped = max(0.0, min(25.0, angle))
+        print(f"[angle-detect] {label} Y={y_mm:.0f}: "
+              f"rise={rise:.0f} run={run:.0f}  "
+              f"→ {angle:.1f}° (clamped {clamped:.1f}°)")
+        return clamped
+
     def splitter_at(y_anchor: float, y_mm: float) -> SplitterSection:
         a = anchors[y_anchor]
         front_x = shell_x_to_paramub_x(a["front_x_shell"]) + length_extend_mm
+        angle = (_detect_angle(front_x, a["front_z_shell"], splitter_kick_x,
+                                 "splitter", y_mm)
+                 if splitter_front_angle_deg is None
+                 else splitter_front_angle_deg)
         end_str = _safe_end_strength(
             front_x, a["front_z_shell"], splitter_kick_x,
-            splitter_front_angle_deg, handle_strength,
+            angle, handle_strength,
             "splitter", y_mm)
         return SplitterSection(
             y_mm=y_mm,
             kick_x_mm=splitter_kick_x,
             front_x_mm=front_x,
             front_z_mm=a["front_z_shell"],
-            front_angle_deg=splitter_front_angle_deg,
+            front_angle_deg=angle,
             start_strength=handle_strength,
             end_strength=end_str,
         )
@@ -451,18 +478,22 @@ def build_spec(hints: dict, anchors: dict,
     def diffuser_at(y_anchor: float, y_mm: float) -> DiffuserSection:
         a = anchors[y_anchor]
         rear_x = shell_x_to_paramub_x(a["rear_x_shell"]) - length_extend_mm
+        angle = (_detect_angle(rear_x, a["rear_z_shell"], diffuser_kick_x,
+                                 "diffuser", y_mm)
+                 if diffuser_rear_angle_deg is None
+                 else diffuser_rear_angle_deg)
         # _safe_end_strength uses |end_x − kick_x| via hypot, so it works
         # for either direction (diffuser kick > rear, splitter kick < front).
         end_str = _safe_end_strength(
             rear_x, a["rear_z_shell"], diffuser_kick_x,
-            diffuser_rear_angle_deg, handle_strength,
+            angle, handle_strength,
             "diffuser", y_mm)
         return DiffuserSection(
             y_mm=y_mm,
             kick_x_mm=diffuser_kick_x,
             rear_x_mm=rear_x,
             rear_z_mm=a["rear_z_shell"],
-            rear_angle_deg=diffuser_rear_angle_deg,
+            rear_angle_deg=angle,
             start_strength=handle_strength,
             end_strength=end_str,
         )
@@ -490,8 +521,10 @@ def build_spec(hints: dict, anchors: dict,
         diffuser_sections=diffuser_sections,
         wheel_house_axial_clearance_mm=20.0,
         wheel_house_lateral_clearance_mm=25.0,
-        front_steering_clearance_mm=0.0,
-        rear_steering_clearance_mm=0.0,
+        front_steering_clearance_mm=front_steering_clearance_mm,
+        rear_steering_clearance_mm=rear_steering_clearance_mm,
+        front_wheel_house_fillet_mm=front_wheel_house_fillet_mm,
+        rear_wheel_house_fillet_mm=rear_wheel_house_fillet_mm,
         camber_front_deg=0.0,
         camber_rear_deg=0.0,
         toe_front_deg=0.0,
@@ -1053,6 +1086,16 @@ def main():
     }
     (args.output_dir / f"{base}_integrate_meta.json").write_text(
         json.dumps(debug_meta, indent=2, default=float))
+
+    # Clean up the cadquery scratch dir — it accumulates ~10-20 MB of
+    # intermediate STLs (body_paramub.stl, remesh_in/out.stl,
+    # wheel_*_paramub.stl, underbody_cut_paramub.stl) that we no longer
+    # need after the final per-part STLs are written.
+    import shutil as _shutil
+    if scratch.exists():
+        _shutil.rmtree(scratch)
+        print(f"[cleanup] removed {scratch}")
+
     return 0
 
 

@@ -157,28 +157,40 @@
 
 <h2 id="tire-spoke">2. Tire + spoke (detected with heuristics)</h2>
 <p>
-  Built in <code>integrate_underbody.build_wheel_spec()</code> from
-  the detected <code>tire_od_mm</code> + <code>tire_width_mm</code>.
-  Most fields are heuristic formulas of those two; the rest are
-  hard-coded for now.
+  Built in <code>integrate_underbody.build_spec()</code> from the
+  detected <code>tire_od_mm</code> + <code>tire_width_mm</code>. The
+  flow is:
 </p>
+<ol>
+  <li><code>rim_diameter_in</code> is <strong>hard-coded at 18 in</strong>
+    (the shell extraction removed the rim, so there's no direct
+    measurement signal). Override per-car if you want a different rim
+    size — this propagates through aspect_ratio + section_width.</li>
+  <li>Given that rim and the measured <code>tire_od</code> /
+    <code>tire_width</code>, the rest of the TireSpec is solved:
+    aspect_ratio = sidewall_height / section_width × 100 where
+    sidewall = (tire_OD/2 − rim_radius). Clamped to [25, 75] so weird
+    measurements don't make absurd tires.</li>
+</ol>
 <table>
   <thead>
     <tr><th>Field</th><th>Provenance</th><th>Formula / value</th></tr>
   </thead>
   <tbody>
     <tr><td colspan="3"><strong>TireSpec</strong></td></tr>
-    <tr><td><code>section_width_mm</code></td>
-        <td>Heuristic</td>
-        <td>round to nearest 5 mm of <code>tire_width</code>.</td></tr>
-    <tr><td><code>aspect_ratio</code></td>
-        <td>Heuristic</td>
-        <td>round to nearest 5 of <code>(tire_OD − rim_diameter) / 2
-            / section_width × 100</code>.</td></tr>
     <tr><td><code>rim_diameter_in</code></td>
-        <td>Heuristic</td>
-        <td>round to nearest 1 in of
-            <code>0.6 × tire_OD / 25.4</code>.</td></tr>
+        <td>Hard-coded</td>
+        <td><code>18.0</code> — no measurement signal (shell extraction
+            removed the rim). Override per-car.</td></tr>
+    <tr><td><code>aspect_ratio</code></td>
+        <td>Derived</td>
+        <td><code>(tire_OD/2 − rim_radius) / section_width × 100</code>,
+            clamped to [25, 75].</td></tr>
+    <tr><td><code>section_width_mm</code></td>
+        <td>Derived</td>
+        <td><code>(tire_OD/2 − rim_radius) / (aspect / 100)</code>.
+            (Solved jointly with aspect_ratio so the tire OD/width
+            match the measurements.)</td></tr>
     <tr><td><code>tread_width_mm</code></td>
         <td>Heuristic</td>
         <td><code>max(60, 0.85 × tire_width)</code>.</td></tr>
@@ -193,20 +205,19 @@
         <td>Hard-coded</td><td><code>14.0</code></td></tr>
     <tr><td colspan="3"><strong>SpokeSpec</strong></td></tr>
     <tr><td><code>wheel_width_mm</code></td>
-        <td>Heuristic</td>
+        <td>Detected</td>
         <td><code>= tire_width</code> (full axial width).</td></tr>
-    <tr><td><code>hub_bore_mm</code></td>
-        <td>Default</td><td>SpokeSpec dataclass default</td></tr>
-    <tr><td><code>wheel_offset_mm</code> (ET)</td>
-        <td>Default</td><td>SpokeSpec dataclass default</td></tr>
-    <tr><td><code>num_spokes</code> +
-            spoke widths, gaps, rim_band_width,
-            spoke_thickness, etc.</td>
+    <tr><td><code>rim_diameter_in</code></td>
+        <td>Hard-coded</td><td><code>18.0</code> (matches tire)</td></tr>
+    <tr><td><code>num_spokes</code></td>
+        <td>Hard-coded</td><td><code>5</code></td></tr>
+    <tr><td><code>hub_bore_mm</code>,
+            <code>wheel_offset_mm</code> (ET),
+            spoke widths / gaps / thicknesses,
+            <code>rim_band_width</code>, etc.</td>
         <td>Default</td>
-        <td>All from <code>SpokeSpec</code> dataclass defaults
-            (typically 5-spoke; the visible wheel design isn't
-            currently learned from the shell since the shell
-            extraction removed the original wheels).</td></tr>
+        <td>All from <code>SpokeSpec</code> dataclass defaults. The
+            visible wheel design isn't learned from the shell.</td></tr>
   </tbody>
 </table>
 
@@ -214,11 +225,24 @@
 <p>
   Three sections each, at <code>y = 0</code>, <code>y = front_wheel_y</code>,
   and <code>y = body_half × 0.95</code>. Built in
-  <code>integrate_underbody.build_splitter_sections()</code> and
-  <code>build_diffuser_sections()</code>. Each section has 4 detected
-  endpoints (x and z, at front + rear) and 3 hard-coded knobs (kick
-  x, edge angle, Bezier handle strengths).
+  <code>integrate_underbody.build_spec()</code>. Each section is a
+  cubic Bezier with 4 control points P0..P3:
 </p>
+<ul>
+  <li><strong>P0 = kick point</strong> at <code>(kick_x_mm,
+    ride_height_mm)</code>. Splitter kick = front_axle + 50 mm
+    (forward); diffuser kick = rear_axle − 50 mm (rearward).</li>
+  <li><strong>P3 = front/rear endpoint</strong> at
+    <code>(front_x_mm, front_z_mm)</code> /
+    <code>(rear_x_mm, rear_z_mm)</code> — measured from the shell at
+    each Y.</li>
+  <li><strong>P1 = P0 + start_strength × chord × t0</strong> (handle
+    leaving the kick along the floor direction).</li>
+  <li><strong>P2 = P3 − end_strength × chord × t3</strong> (handle
+    arriving at the endpoint along the
+    <code>front_angle_deg</code> / <code>rear_angle_deg</code>
+    tangent).</li>
+</ul>
 <table>
   <thead>
     <tr><th>Field</th><th>Provenance</th><th>Value</th></tr>
@@ -236,22 +260,84 @@
         <td>Detected</td>
         <td>Rear-end shell anchor at this Y.</td></tr>
     <tr><td><code>kick_x_mm</code> (splitter / diffuser)</td>
-        <td>Hard-coded</td>
-        <td>splitter: <code>+1450 mm</code>;
-            diffuser: <code>−1400 mm</code>
-            (where the flat-floor floor transitions into the angled
-            splitter / diffuser).</td></tr>
-    <tr><td><code>front_angle_deg</code> / <code>rear_angle_deg</code></td>
-        <td>Hard-coded</td>
-        <td>splitter <code>5°</code>; diffuser <code>5°</code></td></tr>
+        <td>Heuristic</td>
+        <td>splitter: <code>+wheelbase/2 + 50 mm</code>
+            (50 mm forward of front axle);
+            diffuser: <code>−wheelbase/2 − 50 mm</code>
+            (50 mm rearward of rear axle). Offsets adjustable via
+            <code>splitter_kick_offset_mm</code> /
+            <code>diffuser_kick_offset_mm</code> in
+            <code>build_spec()</code>.</td></tr>
+    <tr><td><code>front_angle_deg</code> /
+            <code>rear_angle_deg</code> (tangent at P3)</td>
+        <td>Detected (default)</td>
+        <td><strong>Auto-detected per section</strong> from the shell:
+            <code>arctan((anchor_z − ride_height) /
+            |anchor_x − kick_x|)</code>, clamped to [0°, 25°]. For the
+            alfa example: splitter ≈ 5° @ y=0; diffuser ≈ 8° @ y=0.
+            Override with the keyword arguments
+            <code>splitter_front_angle_deg</code> /
+            <code>diffuser_rear_angle_deg</code> in
+            <code>build_spec()</code> (pass a float to force a constant
+            angle instead of detection).</td></tr>
     <tr><td><code>start_strength</code> / <code>end_strength</code></td>
         <td>Hard-coded</td>
-        <td><code>0.30</code> for both pieces (Bezier handle length
-            as a fraction of the chord).</td></tr>
+        <td><code>handle_strength = 0.30</code> for both pieces (Bezier
+            handle length as a fraction of the chord). The end_strength
+            is auto-clipped per section so the Bezier control point P2
+            doesn't dip below the floor.</td></tr>
   </tbody>
 </table>
 
 <h2 id="hardcoded">4. Hard-coded constants in <code>integrate_underbody.py</code></h2>
+
+<h3 id="wheelhouse-clearance">Wheelhouse clearance — axial vs lateral vs steering</h3>
+<p>
+  Three knobs control the gap between the tire envelope and the arch
+  walls. The naming on one of them is unfortunately misleading; here's
+  what each actually does:
+</p>
+<table>
+  <thead>
+    <tr><th>Field</th><th>Direction</th><th>Effect</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>wheel_house_axial_clearance_mm</code>
+            <small>(misnomer — see note)</small></td>
+        <td><strong>Radial</strong> (in the X-Z plane, perpendicular to
+            the wheel's spin axis — looking at the wheel from the side)</td>
+        <td>Arch inner radius = <code>tire_radius + this</code>. Sets
+            how much taller/longer the arch is than the tire when
+            viewed from the side. Default <strong>20 mm</strong>.</td></tr>
+    <tr><td><code>wheel_house_lateral_clearance_mm</code></td>
+        <td><strong>Lateral</strong> (along Y / vehicle width — the
+            wheel's spin axis)</td>
+        <td>Arch Y extent = <code>tire_width + 2 × this</code> (each
+            side). Sets the sideways gap between tire sidewall and
+            arch wall. Default <strong>25 mm</strong>.</td></tr>
+    <tr><td><code>front_steering_clearance_mm</code> /
+            <code>rear_steering_clearance_mm</code></td>
+        <td><strong>Lateral</strong> (added to lateral on that axle
+            only)</td>
+        <td>Extra Y room on the front (or rear) arches for steered
+            wheel travel — the tire sidewall sweeps slightly outward
+            when the wheel is turned. <strong>Front default now
+            50 mm</strong> (was 0 — was producing a tire-tight arch
+            that couldn't allow steering). Rear default 0.</td></tr>
+  </tbody>
+</table>
+<div class="callout info">
+  <strong>The <code>axial_</code> prefix is a misnomer.</strong> In
+  wheel terminology "axial" usually means "along the spin axis"
+  (= lateral here). Reading the field's value, it's actually the
+  <em>radial</em> clearance (in the wheel's plane of rotation, so
+  X-Z in vehicle frame). The internal arch construction uses
+  <code>arch_radius = tire_radius + axial_clearance_mm</code> — so
+  the value adds to the arch's <em>radius</em>, not its lateral
+  extent. Don't let the name fool you.
+</div>
+
+<h3>Other hard-coded constants</h3>
 <table>
   <thead>
     <tr><th>UnderbodySpec field</th><th class="num">Hard-coded value</th><th>Notes</th></tr>
@@ -261,21 +347,25 @@
         <td>Rake about the front edge. Not learned from the shell.</td></tr>
     <tr><td><code>wheel_house_axial_clearance_mm</code></td>
         <td class="num">20.0</td>
-        <td>Radial gap tire OD → arch ID.</td></tr>
+        <td>Radial gap (see explanation above).</td></tr>
     <tr><td><code>wheel_house_lateral_clearance_mm</code></td>
         <td class="num">25.0</td>
         <td>Base Y clearance per side.</td></tr>
     <tr><td><code>front_steering_clearance_mm</code></td>
-        <td class="num">0.0</td>
-        <td>Extra Y on front arches for steering travel.</td></tr>
+        <td class="num">50.0</td>
+        <td>Extra Y on front arches for steering travel. (Default
+            raised from 0 to 50 so the front arches actually allow
+            steering.)</td></tr>
     <tr><td><code>rear_steering_clearance_mm</code></td>
         <td class="num">0.0</td>
         <td>Extra Y on rear arches.</td></tr>
     <tr><td><code>front_wheel_house_fillet_mm</code></td>
-        <td class="num">100.0 (dataclass default)</td>
-        <td>Not overridden in build_spec(); uses dataclass default.</td></tr>
+        <td class="num">100.0</td>
+        <td>Explicit override (matches the dataclass default but is
+            now declared in build_spec() so the value is visible at
+            the call site).</td></tr>
     <tr><td><code>rear_wheel_house_fillet_mm</code></td>
-        <td class="num">100.0 (dataclass default)</td><td>same</td></tr>
+        <td class="num">100.0</td><td>same</td></tr>
     <tr><td><code>camber_front_deg</code> /
             <code>camber_rear_deg</code></td>
         <td class="num">0.0 / 0.0</td><td></td></tr>
@@ -373,11 +463,15 @@
     less. Exposing as CLI flags is easy (one-line argparse + thread
     through <code>build_spec()</code>).</li>
   <li><strong>Splitter / diffuser angles.</strong>
-    Hard-coded at 5° front and 5° rear. Performance cars may want
-    steeper diffusers (8-15°). The Bezier handle strengths
-    (<code>start_strength = end_strength = 0.30</code>) also affect
-    the curve shape — softer (0.2) or sharper (0.5) reshape the
-    transition without changing endpoints.</li>
+    Now <strong>auto-detected per section</strong> from the shell
+    anchors (the slope from kick to the shell front/rear edge),
+    clamped to [0°, 25°]. Pass an explicit
+    <code>splitter_front_angle_deg</code> /
+    <code>diffuser_rear_angle_deg</code> to
+    <code>build_spec()</code> to force a constant angle. The Bezier
+    handle strengths (<code>handle_strength = 0.30</code>) still
+    affect the curve shape — softer (0.2) or sharper (0.5) reshape
+    the transition without changing endpoints.</li>
   <li><strong>Wheel design.</strong>
     The visible wheel spokes / hub bore / offset are pure
     <code>SpokeSpec</code> defaults (the shell extractor removed the
