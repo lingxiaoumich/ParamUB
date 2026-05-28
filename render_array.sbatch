@@ -13,10 +13,9 @@
 
 # Render one successful car (clean body + 4 wheels) into 10 views.
 # The list of successful cars is rendered_cars.txt (one base name per
-# line) -- regenerate it before submitting:
-#   ls outputs/*/integrate/*_clean.stl | sed -E 's#.*/([^/]+)_clean.stl#\1#' | sort -u > rendered_cars.txt
-#
-# Submit via submit_render.sh, which builds the list + sizes the array.
+# line). Submit via submit_render.sh, which builds the list (body
+# clean STLs only, excluding the per-wheel *_wheel_*_clean.stl) and
+# sizes the array.
 
 set -euo pipefail
 

@@ -11,8 +11,12 @@ set -euo pipefail
 LIST="rendered_cars.txt"
 CONCURRENCY="${CONCURRENCY:-10}"
 
+# A successful car has a BODY clean STL at outputs/<car>/integrate/
+# <car>_clean.stl. Exclude the per-wheel *_wheel_*_clean.stl files and
+# derive the car name from the directory (robust to underscores).
 ls outputs/*/integrate/*_clean.stl 2>/dev/null \
-  | sed -E 's#.*/([^/]+)_clean\.stl#\1#' \
+  | grep -v "_wheel_" \
+  | sed -E 's#outputs/([^/]+)/integrate/.*#\1#' \
   | sort -u > "$LIST"
 
 COUNT=$(wc -l < "$LIST")
