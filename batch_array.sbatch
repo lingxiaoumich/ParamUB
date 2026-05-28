@@ -3,7 +3,7 @@
 #SBATCH --account=jjparkcv_owned1
 #SBATCH --qos=arph
 #SBATCH --partition=standard
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
