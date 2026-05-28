@@ -119,9 +119,14 @@ def load_car(car: str, max_faces: int):
         if wp.is_file():
             # Wheels are already light (~200k faces); cap each at max_faces/2.
             wheel_meshes.append(_decimate(_load_mesh(wp), max(max_faces // 2, 1)))
-    wheels = wheel_meshes[0]
-    for w in wheel_meshes[1:]:
-        wheels = wheels.merge(w)
+    # Some cars finish the body but not all 4 wheel cleans; render the
+    # body alone rather than crashing.
+    if wheel_meshes:
+        wheels = wheel_meshes[0]
+        for w in wheel_meshes[1:]:
+            wheels = wheels.merge(w)
+    else:
+        wheels = pv.PolyData()
 
     pts = [np.asarray(body.points, dtype=np.float32)]
     if wheels.n_points:
