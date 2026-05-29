@@ -11,7 +11,7 @@
 set -euo pipefail
 
 DATA_DIR="${1:-data/data_upload}"
-CONCURRENCY="${CONCURRENCY:-10}"
+CONCURRENCY="${CONCURRENCY:-18}"
 
 if [ ! -d "$DATA_DIR" ]; then
   echo "error: $DATA_DIR does not exist" >&2
