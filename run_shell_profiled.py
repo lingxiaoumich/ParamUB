@@ -65,11 +65,32 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
 import trimesh
+
+# --- profiling instrumentation (added in run_shell_profiled.py) ---
+_PHASE_TIMES: list[tuple[str, float]] = []
+
+
+def _lap(label: str, t0: float) -> float:
+    now = time.perf_counter()
+    dt = now - t0
+    _PHASE_TIMES.append((label, dt))
+    print(f"[timing] {label:30s} {dt:9.1f}s", flush=True)
+    return now
+
+
+def _print_timing_summary() -> None:
+    total = sum(dt for _, dt in _PHASE_TIMES)
+    print("\n[timing] ===== per-phase summary (sorted) =====", flush=True)
+    for label, dt in sorted(_PHASE_TIMES, key=lambda x: -x[1]):
+        pct = 100.0 * dt / total if total else 0.0
+        print(f"[timing] {label:30s} {dt:9.1f}s  {pct:5.1f}%", flush=True)
+    print(f"[timing] {'TOTAL':30s} {total:9.1f}s", flush=True)
 
 from paramub.shell.extract import (
     LABEL_KEEP, LABEL_REMOVE, LABEL_DROP,
@@ -227,6 +248,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main():
+    _T0 = time.perf_counter()
     args = parse_args()
     if not args.input.exists():
         print(f"ERROR: input not found: {args.input}", file=sys.stderr)
@@ -288,7 +310,9 @@ def main():
     # =====================================================================
     # Step 3 — wheel (x, y) footprints (full car: 4 corners)
     # =====================================================================
+    _t = _lap("load+canonicalize (s1)", _T0)
     wheels_xy = s3_locate_wheel_xy_full(body, z_band_height=0.02, n_axles=2)
+    _t = _lap("s3 wheel-xy", _t)
     meta["wheels_xy"] = [asdict(w) for w in wheels_xy]
     if args.render:
         _render_panel(
@@ -305,6 +329,7 @@ def main():
     # Step 4 — wheel hub Z + radius
     # =====================================================================
     wheels = s4_locate_wheel_z(body, wheels_xy)
+    _t = _lap("s4 wheel-z", _t)
     meta["wheels_3d"] = [asdict(w) for w in wheels]
     if args.render:
         _render_panel(
@@ -325,6 +350,7 @@ def main():
                                      radius_factor=cyl_rfac,
                                      axial_factor=cyl_afac)
     remove5 = keep_largest_component(body, remove5_raw)
+    _t = _lap("s5 cylinder-remove+keeplargest", _t)
     meta["step5_faces"] = int((~remove5).sum())
 
     if args.debug:
@@ -377,6 +403,7 @@ def main():
         exclude_mask=remove5,
     )
     remove6a = keep_largest_component(body, remove5 | r6a)
+    _t = _lap("s6a wheel-center-rays+keeplargest", _t)
     meta["step6a_faces"] = int((~remove6a).sum())
     if args.debug:
         _export_keep(body, remove6a, debug_dir / "step6a_kept.stl")
@@ -404,6 +431,7 @@ def main():
                                       inward_cos_threshold=0.3,
                                       extend_inboard_to_y=0.0)
     remove6b = keep_largest_component(body, remove6a | r6b)
+    _t = _lap("s6b wheelhouse-zone+keeplargest", _t)
     meta["step6b_faces"] = int((~remove6b).sum())
     if args.debug:
         _export_keep(body, remove6b, debug_dir / "step6b_kept.stl")
@@ -450,6 +478,7 @@ def main():
                               wheel_radius_factor=CUT_ZONE_WHEEL_FAC,
                               wheel_axial_factor=CUT_ZONE_WHEEL_FAC,
                               outboard_y_limit=outboard_y_limit)
+    _t = _lap("s7 build_cut_zone", _t)
 
     if args.debug:
         cz_volume = build_cut_zone_volume_mesh(
@@ -479,6 +508,7 @@ def main():
         prefilter_normal_z_max=args.prefilter_normal_z_max,
         cut_zone=cut_zone,
     )
+    _t = _lap("s7 classify_visibility (raycast)", _t)
     meta["step7_prefilter_normal_z_max"] = args.prefilter_normal_z_max
 
     keep_idx = np.flatnonzero(labels == LABEL_KEEP)
@@ -510,6 +540,7 @@ def main():
     # holes where steps 5-7 over-removed; step 8 (rim re-cut) plugs those.
     not_keep_mask = labels != LABEL_KEEP
     final_remove = keep_largest_component(body6, not_keep_mask)
+    _t = _lap("final keep_largest_component", _t)
     final_keep_idx = np.flatnonzero(~final_remove)
     final_mesh = body6.submesh([final_keep_idx], append=True)
     if isinstance(final_mesh, list):
@@ -544,53 +575,44 @@ def main():
     # boundary graph has T-junctions (verts of degree ≥ 3 where two
     # surface sheets meet at a single point); using components instead
     # of single-path-walked loops is robust to those.
-    # find_open_boundary_components is cheap (~2 s) and gives useful
-    # diagnostic counts for the meta, so it always runs.
     boundary_edges, components = find_open_boundary_components(final_mesh)
+    _t = _lap("find_open_boundary_components", _t)
     print(f"[boundaries] {len(boundary_edges):,} open edges, "
           f"{len(components)} components")
-    meta["boundaries_all_edge_count"] = int(len(boundary_edges))
+    boundaries_all_path = output_dir / f"{basename}_boundaries_all.stl"
+    n_all = export_edges_as_tubes(
+        final_mesh, boundary_edges, boundaries_all_path)
+    _t = _lap("export_edges_as_tubes (all)", _t)
+    print(f"[boundaries] {boundaries_all_path}  "
+          f"({n_all:,} edges as tubes)")
+    meta["boundaries_all_path"] = str(boundaries_all_path)
+    meta["boundaries_all_edge_count"] = int(n_all)
     meta["boundaries_component_count"] = len(components)
+
     if components:
         longest_verts, longest_edges, longest_peri = components[0]
+        boundaries_longest_path = (
+            output_dir / f"{basename}_boundaries_longest.stl")
+        n_long = export_edges_as_tubes(
+            final_mesh, longest_edges, boundaries_longest_path)
+        print(f"[boundaries] {boundaries_longest_path}  "
+              f"(longest component: {len(longest_verts)} verts, "
+              f"{n_long:,} edges, perimeter ≈ {longest_peri:.3f})")
+        meta["boundaries_longest_path"] = str(boundaries_longest_path)
         meta["boundaries_longest_vertex_count"] = int(len(longest_verts))
         meta["boundaries_longest_edge_count"] = int(len(longest_edges))
         meta["boundaries_longest_perimeter"] = float(longest_peri)
 
-    # The boundary tube-STLs (boundaries_*.stl) and the upper-recut
-    # (upper_recut.stl) are DIAGNOSTIC ONLY: nothing downstream reads
-    # them. Stage 2 (integrate_underbody) consumes meta["final_path"]
-    # = <base>_final.stl. Profiling showed these two phases dominate
-    # run_shell wallclock on slow cars (export_edges_as_tubes 42-60%,
-    # recut_with_longest_rim 40-58%; both scale with open-edge count,
-    # the tube export being O(n²) in the per-edge cylinder concat).
-    # Gate behind --debug so the default path skips them entirely.
-    if args.debug:
-        boundaries_all_path = output_dir / f"{basename}_boundaries_all.stl"
-        n_all = export_edges_as_tubes(
-            final_mesh, boundary_edges, boundaries_all_path)
-        print(f"[boundaries] {boundaries_all_path}  "
-              f"({n_all:,} edges as tubes)")
-        meta["boundaries_all_path"] = str(boundaries_all_path)
-        if components:
-            boundaries_longest_path = (
-                output_dir / f"{basename}_boundaries_longest.stl")
-            n_long = export_edges_as_tubes(
-                final_mesh, longest_edges, boundaries_longest_path)
-            print(f"[boundaries] {boundaries_longest_path}  "
-                  f"(longest component: {len(longest_verts)} verts, "
-                  f"{n_long:,} edges, perimeter ≈ {longest_peri:.3f})")
-            meta["boundaries_longest_path"] = str(boundaries_longest_path)
-
-        recut_mesh, recut_info = recut_with_longest_rim(body, final_mesh)
-        recut_path = output_dir / f"{basename}_upper_recut.stl"
-        recut_mesh.export(str(recut_path), file_type="stl")
-        meta["recut_path"] = str(recut_path)
-        meta["recut_faces"] = int(len(recut_mesh.faces))
-        meta["recut_vertices"] = int(len(recut_mesh.vertices))
-        meta["recut_info"] = recut_info
-        print(f"[recut] {recut_path}  ({len(recut_mesh.faces):,} faces, "
-              f"{len(recut_mesh.vertices):,} verts)")
+    recut_mesh, recut_info = recut_with_longest_rim(body, final_mesh)
+    _t = _lap("recut_with_longest_rim", _t)
+    recut_path = output_dir / f"{basename}_upper_recut.stl"
+    recut_mesh.export(str(recut_path), file_type="stl")
+    meta["recut_path"] = str(recut_path)
+    meta["recut_faces"] = int(len(recut_mesh.faces))
+    meta["recut_vertices"] = int(len(recut_mesh.vertices))
+    meta["recut_info"] = recut_info
+    print(f"[recut] {recut_path}  ({len(recut_mesh.faces):,} faces, "
+          f"{len(recut_mesh.vertices):,} verts)")
 
     meta_path = output_dir / f"{basename}_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2, default=float))
@@ -605,6 +627,7 @@ def main():
         except OSError:
             pass
 
+    _print_timing_summary()
     return 0
 
 
