@@ -27,12 +27,24 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 import numpy as np
 import pyvista as pv
 
 pv.OFF_SCREEN = True
 
 REPO_ROOT = Path(__file__).resolve().parent
+
+# Materials. Upper shell stays grey (matches the original render); only
+# the parametric underbody is blue so it reads as a distinct component
+# in the manual visual check.
+SHELL_COLOR = "#c4ccd4"   # light grey, as original
+UNDERBODY_COLOR = "#3b6fa6"   # medium technical blue
+WHEEL_COLOR = "#23262a"   # near-black
+SECTION_SHELL_COLOR = "#52606d"
+SECTION_UNDERBODY_COLOR = "#1e4e8c"
+SECTION_WHEEL_COLOR = "#23262a"
+Y_SECTIONS_MM = [0, 200, 400, 600, 800]
 
 # (name, camera direction, view-up) -- identical to ab-upt VIEW_SPECS.
 VIEW_SPECS = [
@@ -106,21 +118,24 @@ def _decimate(mesh: "pv.PolyData", max_faces: int) -> "pv.PolyData":
 
 
 def load_car(car: str, max_faces: int):
-    """Return (body_mesh, wheels_mesh, all_points) decimated for render."""
+    """Load the watertight clean body as a single mesh (rendered blue)
+    plus the wheels. Returns (shell, underbody, wheels, all_points)
+    where ``shell`` stays empty and ``underbody`` carries the full
+    body -- keeps the existing render/section call signatures unchanged
+    so only the colour mapping switches.
+    """
     integ = REPO_ROOT / "outputs" / car / "integrate"
-    body_path = integ / f"{car}_clean.stl"
-    if not body_path.is_file():
-        raise FileNotFoundError(f"no clean body: {body_path}")
-    body = _decimate(_load_mesh(body_path), max_faces)
+    clean_path = integ / f"{car}_clean.stl"
+    if not clean_path.is_file():
+        raise FileNotFoundError(f"no clean body: {clean_path}")
+    underbody = _decimate(_load_mesh(clean_path), max_faces)
+    shell = pv.PolyData()
 
     wheel_meshes = []
     for corner in ("front_left", "front_right", "rear_left", "rear_right"):
         wp = integ / f"{car}_wheel_{corner}_clean.stl"
         if wp.is_file():
-            # Wheels are already light (~200k faces); cap each at max_faces/2.
             wheel_meshes.append(_decimate(_load_mesh(wp), max(max_faces // 2, 1)))
-    # Some cars finish the body but not all 4 wheel cleans; render the
-    # body alone rather than crashing.
     if wheel_meshes:
         wheels = wheel_meshes[0]
         for w in wheel_meshes[1:]:
@@ -128,25 +143,37 @@ def load_car(car: str, max_faces: int):
     else:
         wheels = pv.PolyData()
 
-    pts = [np.asarray(body.points, dtype=np.float32)]
-    if wheels.n_points:
-        pts.append(np.asarray(wheels.points, dtype=np.float32))
+    pts = []
+    for m in (shell, underbody, wheels):
+        if m.n_points:
+            pts.append(np.asarray(m.points, dtype=np.float32))
     all_points = np.concatenate(pts, axis=0)
-    return body, wheels, all_points
+    return shell, underbody, wheels, all_points
 
 
-def render_view(body, wheels, all_points, direction, view_up,
+def render_view(shell, underbody, wheels, all_points, direction, view_up,
                 window_size=(640, 460), fit_margin=1.08, zoom_factor=1.0):
+    # "three lights" + eye-dome lighting (screen-space depth-edge enhancement)
+    # makes underbody contours read clearly: the floor/splitter/diffuser
+    # creases show up as crisp edges instead of washing out under the flat
+    # light-kit ambient. Higher specular + lower ambient also helps form
+    # definition without going metallic.
     plotter = pv.Plotter(off_screen=True, window_size=window_size,
-                         lighting="light kit")
+                         lighting="three lights")
     plotter.set_background("#f3f4f6")
-    plotter.add_mesh(body, color="#c4ccd4", smooth_shading=True,
-                     specular=0.12, specular_power=12, ambient=0.25,
-                     diffuse=0.75, show_scalar_bar=False)
+    plotter.enable_eye_dome_lighting()
+    if shell.n_points:
+        plotter.add_mesh(shell, color=SHELL_COLOR, smooth_shading=True,
+                         specular=0.18, specular_power=14, ambient=0.22,
+                         diffuse=0.76, show_scalar_bar=False)
+    if underbody.n_points:
+        plotter.add_mesh(underbody, color=UNDERBODY_COLOR, smooth_shading=True,
+                         specular=0.25, specular_power=20, ambient=0.18,
+                         diffuse=0.78, show_scalar_bar=False)
     if wheels.n_points:
-        plotter.add_mesh(wheels, color="#33373b", smooth_shading=True,
-                         specular=0.2, specular_power=18, ambient=0.2,
-                         diffuse=0.7, show_scalar_bar=False)
+        plotter.add_mesh(wheels, color=WHEEL_COLOR, smooth_shading=True,
+                         specular=0.25, specular_power=22, ambient=0.15,
+                         diffuse=0.72, show_scalar_bar=False)
 
     # Frame on the union of body+wheel bounds so every view is centered.
     bmin = all_points.min(axis=0)
@@ -171,9 +198,81 @@ def render_view(body, wheels, all_points, direction, view_up,
     return img
 
 
+def _slice_to_segments_xz(mesh, y_mm: float) -> np.ndarray | None:
+    """Slice ``mesh`` at the plane Y=y_mm and return its intersection as an
+    (M, 2, 2) array of XZ line segments suitable for matplotlib's
+    LineCollection. Returns None when the slice is empty (mesh doesn't
+    cross the plane, or it does but with no line cells)."""
+    if mesh.n_points == 0:
+        return None
+    try:
+        slc = mesh.slice(normal=(0.0, 1.0, 0.0), origin=(0.0, y_mm, 0.0))
+    except Exception:
+        return None
+    if slc is None or slc.n_points == 0:
+        return None
+    lines = np.asarray(slc.lines)
+    if lines.size == 0:
+        return None
+    # PyVista slice cells are all 2-pt segments: flattened [2, i0, i1, ...]
+    lines = lines.reshape(-1, 3)
+    seg_idx = lines[:, 1:]
+    seg_xyz = np.asarray(slc.points)[seg_idx]   # (M, 2, 3)
+    return seg_xyz[..., [0, 2]]                  # XZ only -> (M, 2, 2)
+
+
+def render_y_section(shell, underbody, wheels, y_mm: float,
+                      all_points, ax) -> None:
+    """Draw the cross-section at Y=y_mm on a matplotlib axes in the XZ
+    plane (X length, Z height). Upper shell in grey, parametric
+    underbody in blue, wheels in dark."""
+    shell_segs = (_slice_to_segments_xz(shell, y_mm)
+                  if shell.n_points else None)
+    ub_segs = (_slice_to_segments_xz(underbody, y_mm)
+               if underbody.n_points else None)
+    wheel_segs = (_slice_to_segments_xz(wheels, y_mm)
+                  if wheels.n_points else None)
+
+    have_any = any(s is not None and len(s)
+                   for s in (shell_segs, ub_segs, wheel_segs))
+    if not have_any:
+        ax.text(0.5, 0.5, f"no intersection at Y={y_mm:.0f} mm",
+                ha="center", va="center", fontsize=9, color="#52606d",
+                transform=ax.transAxes)
+        ax.set_facecolor("#f3f4f6")
+        ax.set_xticks([]); ax.set_yticks([])
+    else:
+        ax.set_facecolor("#f3f4f6")
+        if shell_segs is not None and len(shell_segs):
+            ax.add_collection(LineCollection(
+                shell_segs, colors=SECTION_SHELL_COLOR, linewidths=0.9))
+        if ub_segs is not None and len(ub_segs):
+            ax.add_collection(LineCollection(
+                ub_segs, colors=SECTION_UNDERBODY_COLOR, linewidths=0.9))
+        if wheel_segs is not None and len(wheel_segs):
+            ax.add_collection(LineCollection(
+                wheel_segs, colors=SECTION_WHEEL_COLOR, linewidths=0.9))
+        # Lock XZ extent + aspect across all 5 sections so the body shape
+        # is comparable panel-to-panel.
+        xmin, _, zmin = all_points.min(axis=0)
+        xmax, _, zmax = all_points.max(axis=0)
+        pad_x = 0.04 * (xmax - xmin)
+        pad_z = 0.10 * (zmax - zmin)
+        ax.set_xlim(xmin - pad_x, xmax + pad_x)
+        ax.set_ylim(zmin - pad_z, zmax + pad_z)
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, color="#d0d6dc", linewidth=0.4, alpha=0.7)
+        ax.tick_params(labelsize=6, length=2, width=0.4)
+        for spine in ax.spines.values():
+            spine.set_color("#b9c0c8")
+            spine.set_linewidth(0.5)
+    ax.set_title(f"Section Y = {y_mm:.0f} mm", fontsize=10, pad=6)
+
+
 def render_car(car: str, out_dir: Path, max_faces: int) -> None:
-    body, wheels, all_points = load_car(car, max_faces)
-    print(f"[{car}] body f={body.n_faces:,}  "
+    shell, underbody, wheels, all_points = load_car(car, max_faces)
+    print(f"[{car}] shell f={shell.n_faces:,}  "
+          f"underbody f={underbody.n_faces:,}  "
           f"wheels f={wheels.n_faces:,}", flush=True)
 
     renders_dir = out_dir / "renders"
@@ -181,23 +280,29 @@ def render_car(car: str, out_dir: Path, max_faces: int) -> None:
 
     images = {}
     for name, direction, view_up in VIEW_SPECS:
-        images[name] = render_view(body, wheels, all_points, direction, view_up)
+        images[name] = render_view(shell, underbody, wheels, all_points,
+                                    direction, view_up)
 
-    # 10-view montage (2 rows x 5).
-    fig = plt.figure(figsize=(18, 8), dpi=150)
-    gs = fig.add_gridspec(2, 5, wspace=0.02, hspace=0.08)
+    # 3-row montage: rows 0-1 = 10 PyVista views, row 2 = Y-sections.
+    fig = plt.figure(figsize=(18, 11.5), dpi=150)
+    gs = fig.add_gridspec(3, 5, wspace=0.04, hspace=0.14,
+                          height_ratios=[1.0, 1.0, 0.85])
     for idx, (name, _, _) in enumerate(VIEW_SPECS):
         ax = fig.add_subplot(gs[idx // 5, idx % 5])
         ax.imshow(images[name])
         ax.set_axis_off()
         ax.set_title(name, fontsize=10, pad=6)
-    fig.suptitle(f"{car} -- clean body + wheels", fontsize=14, y=0.98)
+    for i, y in enumerate(Y_SECTIONS_MM):
+        ax = fig.add_subplot(gs[2, i])
+        render_y_section(shell, underbody, wheels, float(y), all_points, ax)
+    fig.suptitle(f"{car} -- clean body (blue) + wheels",
+                 fontsize=14, y=0.995)
     montage = renders_dir / f"{car}_10view.png"
     fig.savefig(montage, bbox_inches="tight")
     plt.close(fig)
     print(f"[{car}] wrote {montage}", flush=True)
 
-    # Per-view PNGs for the contact sheets.
+    # Per-view PNGs for the contact sheets (unchanged set of views).
     for name in CONTACT_VIEWS:
         vdir = out_dir / "views" / view_slug(name)
         vdir.mkdir(parents=True, exist_ok=True)
