@@ -70,6 +70,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -332,11 +333,11 @@ def build_spec(hints: dict, anchors: dict,
                 splitter_front_angle_deg: float = 30.0,
                 diffuser_rear_angle_deg: float = 5.0,
                 handle_strength: float = 0.30,
-                front_steering_clearance_mm: float = 75.0,
+                front_steering_clearance_mm: float = 155.0,
                 rear_steering_clearance_mm: float = 0.0,
                 front_wheel_house_fillet_mm: float = 100.0,
                 rear_wheel_house_fillet_mm: float = 100.0,
-                radial_clearance_mm: float = 20.0,
+                radial_clearance_mm: float = 80.0,
                 lateral_clearance_mm: float = 25.0):
     """Build an UnderbodySpec with multisection splitter + diffuser
     Bezier lofts pinned to the shell's measured front/rear edges.
@@ -382,7 +383,8 @@ def build_spec(hints: dict, anchors: dict,
     spoke = SpokeSpec(
         wheel_width_mm=target_sw,
         rim_diameter_in=rim_in,
-        num_spokes=5,
+        num_spokes=15,
+        fill_hub_bore=True,   # close the hole at the centre of the spoke
     )
 
     # ---- Bezier sections from shell anchors ---------------------------
@@ -833,13 +835,22 @@ def parse_args():
                         "re-tessellated by the BREP trim, and the wheels are "
                         "hidden inside wheelhouses, so coarse is fine here.")
     p.add_argument("--ub-stl-angular-tolerance-rad", type=float, default=0.1,
+                   help="Angular STL chord tolerance for the RAW WHEEL "
+                        "exports. Default 0.1 rad (~5.7°). Lower values "
+                        "exploded stage-2 wallclock (~30+ min on the wheels' "
+                        "booleaned spoke cutouts) for no visible benefit. The "
+                        "underbody FLOOR uses --ub-floor-angular-tolerance-rad "
+                        "instead.")
+    p.add_argument("--ub-floor-angular-tolerance-rad", type=float, default=0.02,
                    help="Angular STL chord tolerance for the RAW underbody "
-                        "+ wheel exports. Default 0.1 rad (~5.7°). Lower "
-                        "values exploded stage-2 wallclock (~30+ min on "
-                        "the wheels' booleaned spoke cutouts) for no "
-                        "visible benefit — final splitter/diffuser "
-                        "smoothness is controlled by "
-                        "--cut-stl-angular-tolerance-rad, not this flag.")
+                        "(floor + splitter + diffuser + wheelhouses) export. "
+                        "Default 0.02 rad (~1.1°) — matches paramub.generate's "
+                        "DEFAULT_FLOOR_ANGULAR_TOLERANCE_RAD so the curved "
+                        "Bezier diffuser/splitter tessellates smoothly instead "
+                        "of looking lumpy/faceted. Applied to the underbody "
+                        "ONLY (wheels keep the coarser "
+                        "--ub-stl-angular-tolerance-rad so their spoke-cutout "
+                        "booleans stay fast).")
     p.add_argument("--remesh-target-mm", type=float, default=None,
                    help="Target edge length (mm) for the pymeshlab "
                         "isotropic remesh of the trimmed underbody. "
@@ -859,16 +870,21 @@ def parse_args():
                    help="Diffuser rear-edge tangent angle (P3 tangent "
                         "of the cubic Bezier). Default 5°.")
     p.add_argument("--front-steering-clearance-mm", type=float,
-                   default=75.0,
-                   help="Extra Y room on front arches for steered wheel "
-                        "travel. Default 75 mm (passenger-car typical).")
+                   default=155.0,
+                   help="Extra INBOARD Y room on front arches for steered "
+                        "wheel travel (toward the centerline). Default 155 mm "
+                        "(75 mm passenger-car base + 80 mm). Applied "
+                        "inboard-only by the wheelhouse builder; the outboard "
+                        "edge is sized separately to the shell rocker.")
     p.add_argument("--rear-steering-clearance-mm", type=float, default=0.0,
                    help="Extra Y room on rear arches. Default 0.")
-    p.add_argument("--radial-clearance-mm", type=float, default=20.0,
+    p.add_argument("--radial-clearance-mm", type=float, default=80.0,
                    help="Wheelhouse radial gap (tire OD → arch ID, in "
-                        "the wheel's plane of rotation). Default 20 mm. "
-                        "Adds to the arch RADIUS — arch is taller and "
-                        "longer (front-back) than the tire by this much.")
+                        "the wheel's plane of rotation). Default 80 mm "
+                        "(was 20; raised by 60 mm so the generated "
+                        "wheelhouse roof sits 60 mm higher above the wheel "
+                        "centre). Adds to the arch RADIUS — arch is taller "
+                        "and longer (front-back) than the tire by this much.")
     p.add_argument("--lateral-clearance-mm", type=float, default=25.0,
                    help="Wheelhouse base lateral clearance per side "
                         "(along wheel spin axis = Y). Default 25 mm. "
@@ -890,6 +906,18 @@ WHEEL_NAME_MAP = {
 
 def main():
     args = parse_args()
+
+    # ---- per-step wall-clock timing -----------------------------------
+    t_total = time.time()
+    _steps: list[tuple[str, float]] = []
+
+    def _step(label: str, t0: float) -> float:
+        dt = time.time() - t0
+        _steps.append((label, dt))
+        print(f"[time] {label:<30s} = {dt:8.2f} s", flush=True)
+        return time.time()
+
+    t = time.time()
     meta = json.loads(args.shell_meta.read_text())
     shell_stl_path = Path(meta["final_path"])
     if not shell_stl_path.is_absolute():
@@ -897,6 +925,7 @@ def main():
     print(f"[load] shell STL = {shell_stl_path}")
     shell = trimesh.load(str(shell_stl_path), force="mesh", process=False)
     print(f"  shell faces={len(shell.faces):,}  verts={len(shell.vertices):,}")
+    t = _step("load shell stl", t)
 
     # SCALE so wheelbase = 2700 mm. Pair the two most-extreme wheels by x
     # (smallest x = front-most, largest x = rear-most) so the wheelbase
@@ -914,6 +943,7 @@ def main():
     )
 
     hints = extract_hints(shell, meta, scale)
+    t = _step("extract hints", t)
     # Splitter loft Y sections: centerline + front wheel center.
     # Diffuser loft Y sections: centerline + rear wheel center.
     # The outboard section copies the wheel-center shape (see build_spec).
@@ -921,7 +951,18 @@ def main():
     y_int_diffuser = hints["rear_wheel_y_mm"]
     section_ys = sorted({0.0, y_int_splitter, y_int_diffuser})
     anchors = measure_shell_anchors(shell_mm, ys=section_ys)
+    t = _step("measure shell anchors", t)
     lat_overrides = lateral_clearance_overrides(hints, extra_extend_mm=100.0)
+
+    # Task 2: front wheelhouse inboard (steering) clearance = 75 mm base
+    # + 80 mm = 155 mm, applied INBOARD ONLY. The wheelhouse builder now
+    # extends the arch asymmetrically (paramub.builders.wheelhouse /
+    # ub_assem): the per-corner lateral_clearance_overrides size the
+    # OUTBOARD edge to the shell rocker, and front_steering_clearance_mm
+    # grows the INBOARD edge toward the cabin — so the extra steering room
+    # no longer pushes the outboard edge past the rocker (the old behaviour
+    # that produced the horizontal spike).
+
     spec = build_spec(hints, anchors, lat_overrides=lat_overrides,
                        y_intermediate_splitter=y_int_splitter,
                        y_intermediate_diffuser=y_int_diffuser,
@@ -933,6 +974,7 @@ def main():
                        rear_wheel_house_fillet_mm=args.rear_fillet_mm,
                        radial_clearance_mm=args.radial_clearance_mm,
                        lateral_clearance_mm=args.lateral_clearance_mm)
+    t = _step("build spec", t)
 
     midpoint_x = hints["midpoint_x_shell_mm"]
     if spec.splitter_sections:
@@ -954,12 +996,13 @@ def main():
     from paramub.builders.ub_assem import build_underbody
     asy, layout = build_underbody(spec)
     print(f"[paramub] layout = {layout}")
+    t = _step("build_underbody (cadquery)", t)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     scratch = args.output_dir / "_scratch"
     scratch.mkdir(parents=True, exist_ok=True)
 
-    # Split assembly: body (floor + wheelhouses) gets subdivide+align;
+    # Split assembly: body (floor + wheelhouses) gets the cut-polygon trim;
     # wheels are rigid bodies that only need the align transform.
     underbody_cq = None
     wheels_cq: dict[str, object] = {}
@@ -974,15 +1017,20 @@ def main():
     # ---- body: align only (no slice, no trim, no subdivide) ------------
     # subdivide_to_edge was only needed for the boundary trim, which has
     # been removed.
+    # Floor/splitter/diffuser are curved Bezier lofts — tessellate them at
+    # the fine FLOOR angular tolerance (matches paramub.generate's floor
+    # default) so they don't look lumpy. Wheels stay coarse (below).
     underbody_raw = cq_obj_to_trimesh_via_stl(
         underbody_cq, scratch / "body_paramub.stl",
         tolerance=args.ub_stl_tolerance_mm,
-        angular_tolerance=args.ub_stl_angular_tolerance_rad)
-    print(f"[underbody raw] faces={len(underbody_raw.faces):,}")
+        angular_tolerance=args.ub_floor_angular_tolerance_rad)
+    print(f"[underbody raw] faces={len(underbody_raw.faces):,}  "
+          f"(angular_tol={args.ub_floor_angular_tolerance_rad} rad)")
     underbody_aligned = align_to_shell_frame(underbody_raw, midpoint_x)
     print(f"[underbody aligned] faces={len(underbody_aligned.faces):,}  "
           f"y range=({underbody_aligned.bounds[0,1]:.1f}, "
           f"{underbody_aligned.bounds[1,1]:.1f})")
+    t = _step("tessellate+align underbody", t)
 
     # ---- wheels: align only --------------------------------------------
     wheel_meshes: dict[str, trimesh.Trimesh] = {}
@@ -993,6 +1041,7 @@ def main():
             angular_tolerance=args.ub_stl_angular_tolerance_rad)
         wheel_meshes[name] = align_to_shell_frame(w_raw, midpoint_x)
         print(f"[wheel] {name:<10s} faces={len(wheel_meshes[name].faces):,}")
+    t = _step("tessellate+align wheels", t)
 
     # ---- outputs --------------------------------------------------------
     base = args.shell_meta.stem.replace("_meta", "")
@@ -1012,6 +1061,7 @@ def main():
         mesh.export(str(out_wheel), file_type="stl")
         wheel_out_paths[name] = str(out_wheel)
         print(f"[out] {out_wheel}  ({len(mesh.faces):,} faces)")
+    t = _step("export raw STLs", t)
 
     # ---- shell-rim trim ------------------------------------------------
     cut_meta: dict = {}
@@ -1103,6 +1153,8 @@ def main():
                 "out_cut_polygon_wall_stl": str(wall_path),
             }
 
+    t = _step("trim + remesh underbody", t)
+
     # ---- meta dump ------------------------------------------------------
     debug_meta = {
         "hints": hints,
@@ -1129,6 +1181,14 @@ def main():
     if scratch.exists():
         _shutil.rmtree(scratch)
         print(f"[cleanup] removed {scratch}")
+
+    # ---- per-step timing summary ---------------------------------------
+    total = time.time() - t_total
+    print("\n[time] ===== integrate_underbody per-step summary =====")
+    for label, dt in _steps:
+        print(f"[time]   {label:<30s} {dt:8.2f} s  "
+              f"({100.0 * dt / max(total, 1e-9):4.1f}%)")
+    print(f"[time]   {'TOTAL':<30s} {total:8.2f} s")
 
     return 0
 

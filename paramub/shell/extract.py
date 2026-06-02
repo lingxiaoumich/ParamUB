@@ -136,6 +136,12 @@ LABEL_DROP = 0
 LABEL_REMOVE = 1
 LABEL_KEEP = 2
 
+# Front/rear auto-orient: flip 180° when the greenhouse-x cue is below this.
+# -0.05 (not 0) leaves marginally-negative correctly-oriented SUVs/wagons
+# alone while still catching genuine reversals (gh <= -0.21). See
+# :func:`s1_canonicalize`.
+ORIENT_FLIP_THRESHOLD = -0.05
+
 
 # ===========================================================================
 # Step 1: canonicalize axes + centering + ground snap
@@ -194,19 +200,96 @@ def _build_rotation(up: int, length: int, lateral: int,
     return R
 
 
+def _greenhouse_x_sign(verts: np.ndarray) -> tuple[float, float]:
+    """Front/rear discriminator from the cabin (greenhouse) position.
+
+    In the canonical frame (+x = rear) the cabin/greenhouse sits toward +x,
+    because a car's tall upper body is rearward of its long, low hood. So
+    the mean x of the upper-body vertices should be POSITIVE when oriented
+    correctly. Returns ``(gh, conf)`` where ``gh`` is the normalised
+    greenhouse-x in [-1, 1] (sign is what matters) and ``conf`` is its
+    absolute value (how decisive the cue is).
+
+    Measured on the labelled v5 batch: correctly-oriented cars cluster at
+    gh ≈ +0.17…+0.31, reversed cars at gh ≈ -0.21…-0.37 — a clean split at
+    0 with a wide margin.
+    """
+    x = verts[:, 0]
+    z = verts[:, 2]
+    x0, x1 = float(x.min()), float(x.max())
+    z0, z1 = float(z.min()), float(z.max())
+    half = (x1 - x0) / 2.0
+    if half <= 1e-9 or (z1 - z0) <= 1e-9:
+        return 0.0, 0.0
+    xc = (x - 0.5 * (x0 + x1)) / half          # -1..+1 along length
+    zn = (z - z0) / (z1 - z0)                   # 0..1 height
+    upper = zn > 0.70                           # greenhouse band
+    if upper.sum() < 10:
+        upper = zn > 0.50
+    if upper.sum() < 10:
+        return 0.0, 0.0
+    gh = float(xc[upper].mean())
+    return gh, abs(gh)
+
+
 def s1_canonicalize(in_path: Path | str,
                     flip_length: bool = True,
+                    auto_orient: bool = True,
+                    force_flip: bool = False,
                     verbose: bool = True
                     ) -> tuple[trimesh.Trimesh, CanonicalFrame]:
     """Load the mesh and rotate it into the canonical frame:
     +x rearward, +y lateral, +z up, body centered on x = 0,
-    lowest mesh vertex snapped to z = 0."""
+    lowest mesh vertex snapped to z = 0.
+
+    ``flip_length`` sets the INITIAL guess for the length-axis direction.
+    With ``auto_orient`` (default), the front/rear orientation is then
+    verified from the cabin position (see :func:`_greenhouse_x_sign`) and
+    a 180° yaw flip is applied if the car came out backwards — so the
+    result is correct regardless of the input's length-axis sign. This
+    fixes the ``bad - reverse in x`` failures where the old hardcoded
+    ``flip_length`` guessed wrong.
+
+    ``force_flip`` unconditionally applies the 180° yaw flip (and skips the
+    auto_orient cabin test). Use for the cab-at-+x reversals that the
+    greenhouse-x cue cannot detect (a correct pickup is geometrically
+    identical to a reversed one by cabin position) but that a human has
+    confirmed are backwards."""
     in_path = Path(in_path)
     full = _load_mesh(in_path)
     original_bounds = full.bounds.copy()
     up, length, lateral = _detect_orig_axes(full.bounds)
     R = _build_rotation(up, length, lateral, flip_length=flip_length)
     rotated = full.vertices @ R.T
+
+    flipped_180 = False
+    gh = 0.0
+    if force_flip:
+        # Human-confirmed reversal that the cabin cue can't detect.
+        flip = np.diag([-1.0, -1.0, 1.0])
+        R = flip @ R
+        rotated = full.vertices @ R.T
+        flipped_180 = True
+    elif auto_orient:
+        gh, _conf = _greenhouse_x_sign(rotated)
+        if gh < ORIENT_FLIP_THRESHOLD:
+            # Cabin landed decisively toward -x -> car is backwards. Yaw 180°
+            # about Z (negate x and y) and fold that into R so the recorded
+            # frame transform stays exact.
+            #
+            # The threshold is -0.05, not 0: validated on the labelled v5
+            # batch, genuine reversals have gh <= -0.21 while a handful of
+            # correctly-oriented tall SUVs/wagons sit marginally negative
+            # (gh -0.001..-0.031) because their greenhouse reaches forward
+            # over the cabin. -0.05 cleanly separates the two with zero
+            # false positives. (Cab-forward vans whose cabin truly leads,
+            # and reversed cars that still read gh>0, can't be resolved by
+            # cabin position alone — those need manual review.)
+            flip = np.diag([-1.0, -1.0, 1.0])
+            R = flip @ R
+            rotated = full.vertices @ R.T
+            flipped_180 = True
+
     mid_x = 0.5 * (rotated[:, 0].min() + rotated[:, 0].max())
     z_floor = rotated[:, 2].min()
     mid_y = 0.5 * (rotated[:, 1].min() + rotated[:, 1].max())
@@ -222,6 +305,11 @@ def s1_canonicalize(in_path: Path | str,
     if verbose:
         print(f"[s1] input axes: up={'XYZ'[up]} length={'XYZ'[length]} "
               f"lateral={'XYZ'[lateral]}  flip_length={flip_length}")
+        if auto_orient:
+            gh_final, _ = _greenhouse_x_sign(rotated)
+            print(f"[s1] auto-orient: greenhouse_x={gh:+.3f} "
+                  f"-> {'FLIPPED 180' if flipped_180 else 'kept'}  "
+                  f"(final gh={gh_final:+.3f})")
         print(f"[s1] canonical bounds:\n{new.bounds}")
         print(f"[s1] canonical extent: {(new.bounds[1] - new.bounds[0]).round(4).tolist()}")
     return new, frame

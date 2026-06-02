@@ -1,6 +1,30 @@
 # Generated outputs
 outputs/
 
+# Input data (64 GB of raw STLs — never commit)
+data/
+
+# Slurm logs
+logs/
+
+# Scratch analysis dumps / probes / temp job files
+_*.txt
+probe_*.py
+probe_*.sbatch
+validate_orient.py
+validate_orient.sbatch
+vfinal.sbatch
+*.tmp.*
+render_list_v5.txt
+rendered_cars.txt
+rerun_reversed.txt
+rerun_forceflip.txt
+batch_report.csv
+batch_report.md
+
+# Agent/editor state
+.claude/
+
 # Per-run artifacts at repo root
 tire_assembly.stl
 tire_preview.png

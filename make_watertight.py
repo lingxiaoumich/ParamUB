@@ -96,8 +96,10 @@ def main():
                         "--input) to include surface-distance metrics "
                         "in the verify report. Defaults to --input; "
                         "pass an empty string to skip.")
-    p.add_argument("--n-samples", type=int, default=30_000,
-                   help="Points sampled per surface for distance metrics.")
+    p.add_argument("--n-samples", type=int, default=5_000,
+                   help="Points sampled per surface for distance metrics. "
+                        "Default 5000 (was 30000; the surface-distance verify "
+                        "is QA only and dominated stage-B wallclock).")
     # Blender stage knobs (forwarded to smooth_remesh)
     p.add_argument("--depth", type=int, default=11,
                    help="Octree depth for the Smooth Remesh modifier "
@@ -144,6 +146,12 @@ def main():
                         "Default ON.")
     p.add_argument("--no-wheels", action="store_false", dest="include_wheels",
                    help="Skip the wheel processing stage.")
+    p.add_argument("--no-verify-wheels", action="store_true",
+                   help="Still make the wheels watertight, but SKIP their "
+                        "surface-distance verification (the 2x per-wheel "
+                        "sampling). Wheels are trimesh fill_holes only — their "
+                        "geometry is unchanged, so the distance is ~0 and the "
+                        "sampling is wasted time.")
     args = p.parse_args()
 
     fixed_path = (args.fixed_out
@@ -194,7 +202,8 @@ def main():
                 make_wheel_watertight(
                     src, out_path,
                     report_json=report_path,
-                    reference_stl=str(src),
+                    reference_stl=(None if args.no_verify_wheels
+                                   else str(src)),
                     n_samples=args.n_samples,
                 )
 

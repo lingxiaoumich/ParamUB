@@ -65,6 +65,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -189,7 +190,7 @@ def _render_panel(*, body_stl: Path, remove_mask: np.ndarray, title: str,
                                       dir=str(scratch_dir)) as fh:
         json.dump(payload, fh)
         payload_path = Path(fh.name)
-    cmd = [sys.executable, "-m", "paramub.shell_render", str(payload_path)]
+    cmd = [sys.executable, "-m", "paramub.shell.render", str(payload_path)]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     payload_path.unlink(missing_ok=True)
     if proc.returncode != 0:
@@ -217,6 +218,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--render", action="store_true",
                    help="Render per-step PNG composites to "
                         "<output>/<name>_renders/.")
+    p.add_argument("--force-flip", action="store_true",
+                   help="Unconditionally apply the 180° front/rear yaw flip "
+                        "in stage 1 (for human-confirmed reversals the "
+                        "greenhouse-x auto-orient cannot detect, e.g. "
+                        "cab-at-+x pickups).")
     p.add_argument("--prefilter-normal-z-max", type=float, default=-0.30,
                    help="Step 7 prefilter: faces with normal_z below this "
                         "and z in the bottom prefilter_z_band_frac of the "
@@ -246,10 +252,23 @@ def main():
 
     meta: dict = {"input": str(args.input)}
 
+    # ---- per-step wall-clock timing -----------------------------------
+    t_total = time.time()
+    _steps: list[tuple[str, float]] = []
+
+    def _step(label: str, t0: float) -> float:
+        dt = time.time() - t0
+        _steps.append((label, dt))
+        print(f"[time] {label:<26s} = {dt:8.2f} s", flush=True)
+        return time.time()
+
+    t = time.time()
+
     # =====================================================================
     # Step 1 — canonicalize
     # =====================================================================
-    body1, frame = s1_canonicalize(args.input, flip_length=True)
+    body1, frame = s1_canonicalize(args.input, flip_length=True,
+                                   force_flip=args.force_flip)
     meta["frame_R"] = frame.R.tolist()
     meta["frame_t"] = frame.t.tolist()
     meta["original_bounds"] = frame.original_bounds.tolist()
@@ -284,6 +303,7 @@ def main():
     # or per-face and work on both sides of the car.
     body = body1
     body_deci = body1_deci if args.render else None
+    t = _step("step1 canonicalize", t)
 
     # =====================================================================
     # Step 3 — wheel (x, y) footprints (full car: 4 corners)
@@ -301,6 +321,8 @@ def main():
             wheels_xy=wheels_xy, wheels_xy_color="#c026d3",
         )
 
+    t = _step("step3 wheel (x,y)", t)
+
     # =====================================================================
     # Step 4 — wheel hub Z + radius
     # =====================================================================
@@ -316,6 +338,8 @@ def main():
             scratch_dir=scratch_dir,
             wheels_3d=wheels, wheels_3d_color="#ea580c",
         )
+
+    t = _step("step4 wheel hub z+radius", t)
 
     # =====================================================================
     # Step 5 — wheel cylinder removal (tight envelope, factors 1.00)
@@ -364,6 +388,8 @@ def main():
             cylinder_axial_factor=cyl_afac,
         )
 
+    t = _step("step5 cylinder remove", t)
+
     # =====================================================================
     # Step 6a — wheel-center ray visibility
     # =====================================================================
@@ -395,6 +421,8 @@ def main():
             wheels_3d=wheels, wheels_3d_color="#ea580c",
         )
 
+    t = _step("step6a wheel-center rays", t)
+
     # =====================================================================
     # Step 6b — wheelhouse-zone inward (geometric backstop)
     # =====================================================================
@@ -422,6 +450,8 @@ def main():
             scratch_dir=scratch_dir,
             wheels_3d=wheels, wheels_3d_color="#ea580c",
         )
+
+    t = _step("step6b wheelhouse zone", t)
 
     # =====================================================================
     # Step 7 — lower-perimeter cut via visibility classifier + cut zone
@@ -535,6 +565,8 @@ def main():
             scratch_dir=scratch_dir,
         )
 
+    t = _step("step7 visibility cut", t)
+
     # =====================================================================
     # Step 8 — open-boundary components + re-cut via longest rim
     # =====================================================================
@@ -592,6 +624,8 @@ def main():
         print(f"[recut] {recut_path}  ({len(recut_mesh.faces):,} faces, "
               f"{len(recut_mesh.vertices):,} verts)")
 
+    t = _step("step8 boundaries+recut", t)
+
     meta_path = output_dir / f"{basename}_meta.json"
     meta_path.write_text(json.dumps(meta, indent=2, default=float))
     print(f"[meta] {meta_path}")
@@ -604,6 +638,14 @@ def main():
             scratch_dir.rmdir()
         except OSError:
             pass
+
+    # ---- per-step timing summary ---------------------------------------
+    total = time.time() - t_total
+    print("\n[time] ===== run_shell per-step summary =====")
+    for label, dt in _steps:
+        print(f"[time]   {label:<26s} {dt:8.2f} s  "
+              f"({100.0 * dt / max(total, 1e-9):4.1f}%)")
+    print(f"[time]   {'TOTAL':<26s} {total:8.2f} s")
 
     return 0
 

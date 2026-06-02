@@ -57,10 +57,19 @@ class WheelhouseSpec:
                               that was a misnomer — the value is along
                               the radial direction, not the wheel's spin
                               axis.)
-        lateral_clearance_mm: extra Y per side along the wheel's spin
-                              axis (= sideways in vehicle frame).
-                              Includes steering clearance on a front
-                              wheel.
+        lateral_clearance_mm: OUTBOARD extra Y along the wheel's spin axis
+                              (= sideways toward the floor edge). The arch's
+                              outboard half-length is tire_width/2 + this.
+                              (Sized to reach the shell rocker line via the
+                              per-corner overrides upstream.)
+        inboard_clearance_mm: INBOARD extra Y (toward the vehicle
+                              centerline). The arch's inboard half-length is
+                              tire_width/2 + this. None => symmetric, i.e.
+                              equals ``lateral_clearance_mm``. Front steering
+                              clearance is added here (inboard only) so the
+                              arch grows toward the cabin for steered-wheel
+                              travel WITHOUT pushing the outboard edge past
+                              the rocker (which produced a horizontal spike).
         thickness_mm:        intermediate shell thickness; only used inside
                               the wheelhouse solid construction (the final
                               surface-mode output is zero-thickness, with
@@ -84,11 +93,13 @@ class WheelhouseSpec:
 
     radial_clearance_mm: float = 30.0
     lateral_clearance_mm: float = 35.0
+    inboard_clearance_mm: Optional[float] = None
     thickness_mm: float = 6.0
     fillet_mm: float = 100.0
 
     ride_height_mm: float = 100.0
     floor_edge_y: float = 900.0
+    base_drop_mm: float = 0.0
 
     def validate(self) -> None:
         if self.side not in {"left", "right"}:
@@ -104,8 +115,30 @@ class WheelhouseSpec:
         return self.tire_radius_mm + self.radial_clearance_mm
 
     @property
+    def base_z_mm(self) -> float:
+        """Z of the flat base chord. Dropped ``base_drop_mm`` below ride
+        height so the arch walls cross the floor/splitter/diffuser surface
+        transversally (a clean boolean) instead of ending coincident with
+        it; ``below_cropper`` trims the excess back to the surface."""
+        return self.ride_height_mm - self.base_drop_mm
+
+    @property
+    def outboard_half_len_mm(self) -> float:
+        """Axial half-length on the outboard (floor-edge) side."""
+        return self.tire_width_mm / 2.0 + self.lateral_clearance_mm
+
+    @property
+    def inboard_half_len_mm(self) -> float:
+        """Axial half-length on the inboard (centerline) side. Falls back
+        to the outboard clearance when ``inboard_clearance_mm`` is None."""
+        inb = (self.lateral_clearance_mm if self.inboard_clearance_mm is None
+               else self.inboard_clearance_mm)
+        return self.tire_width_mm / 2.0 + inb
+
+    @property
     def arch_length_mm(self) -> float:
-        return self.tire_width_mm + 2.0 * self.lateral_clearance_mm
+        """Total axial span of the arch = inboard half + outboard half."""
+        return self.inboard_half_len_mm + self.outboard_half_len_mm
 
 
 def build_wheelhouse_solid(spec: WheelhouseSpec):
@@ -119,21 +152,29 @@ def build_wheelhouse_solid(spec: WheelhouseSpec):
     spec.validate()
     sign = +1.0 if spec.side == "right" else -1.0
     arch_r = spec.arch_radius_mm
-    arch_length = spec.arch_length_mm
-    y_outboard = spec.y_track + sign * arch_length / 2.0
+    # Asymmetric axial span: outboard half reaches the floor/rocker edge,
+    # inboard half absorbs the (steering) clearance toward the centerline.
+    out_half = spec.outboard_half_len_mm
+    in_half = spec.inboard_half_len_mm
+    total_len = out_half + in_half
+    # Centre of the (symmetric) extrusion, offset from the wheel centre
+    # toward the outboard side by half the inboard/outboard imbalance, so
+    # the final solid spans [y_track - sign*in_half, y_track + sign*out_half].
+    y_mid = spec.y_track + sign * (out_half - in_half) / 2.0
+    y_outboard = spec.y_track + sign * out_half
 
     cross_section = (
         cq.Workplane("XZ")
-        .moveTo(spec.axle_x - arch_r, spec.ride_height_mm)
+        .moveTo(spec.axle_x - arch_r, spec.base_z_mm)
         .lineTo(spec.axle_x - arch_r, spec.tire_radius_mm)
         .threePointArc((spec.axle_x, spec.tire_radius_mm + arch_r),
                        (spec.axle_x + arch_r, spec.tire_radius_mm))
-        .lineTo(spec.axle_x + arch_r, spec.ride_height_mm)
+        .lineTo(spec.axle_x + arch_r, spec.base_z_mm)
         .close()
     )
     solid_wp = (cross_section
-                .extrude(arch_length / 2.0, both=True)
-                .translate((0, spec.y_track, 0)))
+                .extrude(total_len / 2.0, both=True)
+                .translate((0, y_mid, 0)))
 
     fillet_r = max(min(spec.fillet_mm, arch_r * 0.9), 0.0)
     if fillet_r > 0:
@@ -184,7 +225,7 @@ def extract_wheelhouse_surfaces(solid_wp, spec: WheelhouseSpec,
     for f in solid_wp.faces().vals():
         fb = f.BoundingBox()
         # Bottom chord (flat at z = ride_height).
-        if abs(fb.zmax - spec.ride_height_mm) < 0.5 and (fb.zmax - fb.zmin) < 0.5:
+        if abs(fb.zmax - spec.base_z_mm) < 0.5 and (fb.zmax - fb.zmin) < 0.5:
             continue
         # Outboard cap (flat at most-outboard Y).
         if sign > 0:

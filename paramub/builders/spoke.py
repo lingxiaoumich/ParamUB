@@ -82,6 +82,13 @@ class SpokeSpec:
     spoke_thickness_mm: float = 150.0
     spoke_outer_crown_mm: float = 4.0
 
+    # hub
+    # fill_hub_bore: when True the revolved disc profile reaches the spin
+    # axis (R=0) so the disc is solid through its centre — i.e. the
+    # central axle bore is closed and there is no hole at the centre of
+    # the spoke. When False (default) the disc keeps the hub bore.
+    fill_hub_bore: bool = False
+
     def validate(self) -> None:
         if self.num_spokes < 3:
             raise ValueError("num_spokes must be >= 3")
@@ -132,6 +139,10 @@ def build_spoke_disc(spec: SpokeSpec):
     """
     spec.validate()
     R_hub = spec.hub_bore_mm / 2.0
+    # Inner radius of the revolved profile. With fill_hub_bore the profile
+    # runs all the way to the spin axis (R=0), so the revolve produces a
+    # solid disc with no central hole; otherwise it stops at the hub bore.
+    R_inner = 0.0 if spec.fill_hub_bore else R_hub
     R_hub_outer = spec.hub_ring_od_mm
     # 0.5 mm overlap into the rim so the boolean union closes cleanly.
     R_disc_outer = spec.rim_radius_mm - spec.rim_band_width_mm + 0.5
@@ -184,12 +195,12 @@ def build_spoke_disc(spec: SpokeSpec):
 
     wp = (
         cq.Workplane("XZ")
-        .moveTo(R_hub, z_mount)
+        .moveTo(R_inner, z_mount)
         .lineTo(R_hub_outer, z_mount)
         .spline(inboard_pts[1:], includeCurrent=True)
         .spline(cap_pts[1:], includeCurrent=True)
         .spline(outboard_pts[1:], includeCurrent=True)
-        .lineTo(R_hub, z_hub_outboard)
+        .lineTo(R_inner, z_hub_outboard)
         .close()
     )
     return wp.revolve(axisStart=(0, 0), axisEnd=(0, 1))

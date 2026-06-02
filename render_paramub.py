@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import matplotlib
@@ -117,15 +118,23 @@ def _decimate(mesh: "pv.PolyData", max_faces: int) -> "pv.PolyData":
     return out.clean()
 
 
-def load_car(car: str, max_faces: int):
+def load_car(car: str, max_faces: int, integ_dir: Path | None = None):
     """Load the watertight clean body as a single mesh (rendered blue)
     plus the wheels. Returns (shell, underbody, wheels, all_points)
     where ``shell`` stays empty and ``underbody`` carries the full
     body -- keeps the existing render/section call signatures unchanged
     so only the colour mapping switches.
+
+    ``integ_dir`` overrides the directory the clean body + wheel STLs are
+    read from (default ``outputs/<car>/integrate``); used to point the
+    renderer at an alternate run such as ``outputs/<car>_v2/integrate``.
     """
-    integ = REPO_ROOT / "outputs" / car / "integrate"
-    clean_path = integ / f"{car}_clean.stl"
+    integ = Path(integ_dir) if integ_dir is not None else (
+        REPO_ROOT / "outputs" / car / "integrate")
+    # Prefer the deflector-trimmed body when available.
+    clean_path = integ / f"{car}_clean_deflector.stl"
+    if not clean_path.is_file():
+        clean_path = integ / f"{car}_clean.stl"
     if not clean_path.is_file():
         raise FileNotFoundError(f"no clean body: {clean_path}")
     underbody = _decimate(_load_mesh(clean_path), max_faces)
@@ -269,19 +278,26 @@ def render_y_section(shell, underbody, wheels, y_mm: float,
     ax.set_title(f"Section Y = {y_mm:.0f} mm", fontsize=10, pad=6)
 
 
-def render_car(car: str, out_dir: Path, max_faces: int) -> None:
-    shell, underbody, wheels, all_points = load_car(car, max_faces)
+def render_car(car: str, out_dir: Path, max_faces: int,
+               integ_dir: Path | None = None) -> None:
+    t0 = time.time()
+    shell, underbody, wheels, all_points = load_car(car, max_faces, integ_dir)
     print(f"[{car}] shell f={shell.n_faces:,}  "
           f"underbody f={underbody.n_faces:,}  "
           f"wheels f={wheels.n_faces:,}", flush=True)
+    t_load = time.time() - t0
+    print(f"[time] load_car                = {t_load:8.2f} s", flush=True)
 
     renders_dir = out_dir / "renders"
     renders_dir.mkdir(parents=True, exist_ok=True)
 
+    t1 = time.time()
     images = {}
     for name, direction, view_up in VIEW_SPECS:
         images[name] = render_view(shell, underbody, wheels, all_points,
                                     direction, view_up)
+    t_views = time.time() - t1
+    print(f"[time] render 10 views         = {t_views:8.2f} s", flush=True)
 
     # 3-row montage: rows 0-1 = 10 PyVista views, row 2 = Y-sections.
     fig = plt.figure(figsize=(18, 11.5), dpi=150)
@@ -292,15 +308,21 @@ def render_car(car: str, out_dir: Path, max_faces: int) -> None:
         ax.imshow(images[name])
         ax.set_axis_off()
         ax.set_title(name, fontsize=10, pad=6)
+    t2 = time.time()
     for i, y in enumerate(Y_SECTIONS_MM):
         ax = fig.add_subplot(gs[2, i])
         render_y_section(shell, underbody, wheels, float(y), all_points, ax)
+    t_sections = time.time() - t2
+    print(f"[time] Y sections {str(Y_SECTIONS_MM):<14s} = "
+          f"{t_sections:8.2f} s", flush=True)
     fig.suptitle(f"{car} -- clean body (blue) + wheels",
                  fontsize=14, y=0.995)
     montage = renders_dir / f"{car}_10view.png"
     fig.savefig(montage, bbox_inches="tight")
     plt.close(fig)
     print(f"[{car}] wrote {montage}", flush=True)
+    print(f"[time] render_car TOTAL        = {time.time() - t0:8.2f} s",
+          flush=True)
 
     # Per-view PNGs for the contact sheets (unchanged set of views).
     for name in CONTACT_VIEWS:
@@ -316,8 +338,13 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "outputs" / "summary")
     ap.add_argument("--max-faces", type=int, default=150000,
                      help="decimation target for the body (render only).")
+    ap.add_argument("--integrate-dir", type=Path, default=None,
+                     help="directory holding <car>_clean.stl + wheel STLs. "
+                          "Default outputs/<car>/integrate. Point this at "
+                          "an alternate run, e.g. outputs/<car>_v2/integrate.")
     args = ap.parse_args()
-    render_car(args.car, args.out, args.max_faces)
+    render_car(args.car, args.out, args.max_faces,
+               integ_dir=args.integrate_dir)
 
 
 if __name__ == "__main__":

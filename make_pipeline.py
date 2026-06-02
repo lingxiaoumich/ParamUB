@@ -193,6 +193,11 @@ def main():
     p.add_argument("--timeout-watertight-min", type=float, default=45.0,
                    help="Stage-4 (make_watertight) watchdog, minutes. "
                         "Default 45 (legit big cars take up to ~35 min).")
+    # Stage 1 orientation override
+    p.add_argument("--force-flip", action="store_true",
+                   help="Force the 180° front/rear flip in stage 1 (for "
+                        "human-confirmed reversals the greenhouse-x cue can't "
+                        "detect, e.g. cab-at-+x pickups).")
     # Stage 4 knobs forwarded
     p.add_argument("--depth", type=int, default=11,
                    help="Stage-4 octree depth for smooth remesh. Default 11. "
@@ -205,6 +210,10 @@ def main():
                         "preserves all detail), else full. Pass "
                         "--wt-mode full to force the dual-contour "
                         "remesh.")
+    p.add_argument("--no-verify-wheels", action="store_true",
+                   help="Forward to stage 4: skip the per-wheel "
+                        "surface-distance verification (wheels are still made "
+                        "watertight). Saves the 4x2 distance samplings.")
     args = p.parse_args()
 
     base = args.input.stem
@@ -250,7 +259,8 @@ def main():
                 "shell extraction (run_shell.py)", 1, "run_shell",
                 py_unbuf + ["run_shell.py",
                  "--input", str(args.input),
-                 "--output-dir", str(args.shell_dir)],
+                 "--output-dir", str(args.shell_dir)]
+                + (["--force-flip"] if args.force_flip else []),
                 base, logs_dir, master_log,
                 timeout_s=_tmo(args.timeout_shell_min))
             if not ok:
@@ -305,7 +315,8 @@ def main():
                  "--reference",
                  str(args.integrate_dir / f"{base}_combined.stl"),
                  "--mode", args.wt_mode,
-                 "--depth", str(args.depth)],
+                 "--depth", str(args.depth)]
+                + (["--no-verify-wheels"] if args.no_verify_wheels else []),
                 base, logs_dir, master_log,
                 timeout_s=_tmo(args.timeout_watertight_min))
             if not ok:

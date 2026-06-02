@@ -174,49 +174,82 @@ def _make_wheelhouse_specs(spec: UnderbodySpec, layout: dict,
                             tire_radius_r: float, tire_width_r: float,
                             sides: tuple[str, ...] = ("left", "right")):
     """Per-corner WheelhouseSpec list. ``sides`` filters which sides are
-    emitted (default both). Per-corner lateral clearance can be overridden
-    via ``spec.lateral_clearance_overrides_mm`` — a dict keyed by
-    ``(axle, side)`` where axle ∈ {"front", "rear"} and side ∈ {"left",
-    "right"}; the value REPLACES the base lateral_clearance for that
-    corner (it does NOT add to the steering clearance)."""
+    emitted (default both).
+
+    The arch extends ASYMMETRICALLY in Y:
+      * OUTBOARD half = tire_width/2 + outboard clearance, where the
+        outboard clearance is the per-corner ``(axle, side)`` value from
+        ``spec.lateral_clearance_overrides_mm`` (sized to reach the shell
+        rocker line) or, absent an override, ``wheel_house_lateral_clearance_mm``.
+      * INBOARD  half = tire_width/2 + (wheel_house_lateral_clearance_mm
+        + {front,rear}_steering_clearance_mm). Steering clearance grows the
+        arch toward the centerline only, so it never pushes the outboard
+        edge past the rocker."""
     overrides = getattr(spec, "lateral_clearance_overrides_mm", None) or {}
-    base_front = (spec.wheel_house_lateral_clearance_mm
-                  + spec.front_steering_clearance_mm)
-    base_rear = (spec.wheel_house_lateral_clearance_mm
-                 + spec.rear_steering_clearance_mm)
+    base = spec.wheel_house_lateral_clearance_mm
+    steer = {"front": spec.front_steering_clearance_mm,
+             "rear": spec.rear_steering_clearance_mm}
     y_half = spec.floor_width_mm / 2.0
 
-    def lat(axle: str, side: str, base: float) -> float:
+    # Drop each arch's flat base below the LOWEST floor/splitter/diffuser
+    # surface it could overlap (+ a boolean margin) so the wheelhouse walls
+    # cross the underbody surface transversally and cut a clean rim. The
+    # flat floor sits at ride_height; the front splitter can dip well below
+    # it, so an arch base pinned at ride_height leaves walls floating above
+    # the surface (and a coincident-face boolean on the flat floor) -> the
+    # ragged 'spike'. below_cropper trims the excess back to the surface.
+    _BOOLEAN_MARGIN_MM = 50.0
+    _surf_min_z = spec.ride_height_mm
+    if spec.splitter_sections:
+        _surf_min_z = min(_surf_min_z,
+                          min(s.front_z_mm for s in spec.splitter_sections))
+    if spec.diffuser_sections:
+        _surf_min_z = min(_surf_min_z,
+                          min(s.rear_z_mm for s in spec.diffuser_sections))
+    _base_drop = (spec.ride_height_mm - _surf_min_z) + _BOOLEAN_MARGIN_MM
+    print(f"[wheelhouse] floor surface min z={_surf_min_z:.1f} mm; arch "
+          f"base dropped {_base_drop:.1f} mm below ride for clean rim")
+
+    def outboard(axle: str, side: str) -> float:
+        # Outboard reaches the shell rocker line when an override is given,
+        # else the plain base lateral clearance. Steering is NOT added here
+        # — it would push the outboard edge past the rocker.
         return float(overrides.get((axle, side), base))
 
+    def inboard(axle: str, side: str) -> float:
+        # Inboard absorbs the (steering) clearance, toward the centerline.
+        return base + steer[axle]
+
     targets = [
-        # axle_x, y_track, tire_r, tire_w, lat_clear, side, fillet
+        # axle_x, y_track, tire_r, tire_w, side, axle, fillet
         (layout["front_axle_x"], +spec.track_front_mm / 2.0,
-         tire_radius_f, tire_width_f, lat("front", "right", base_front),
-         "right", spec.front_wheel_house_fillet_mm),
+         tire_radius_f, tire_width_f, "right", "front",
+         spec.front_wheel_house_fillet_mm),
         (layout["front_axle_x"], -spec.track_front_mm / 2.0,
-         tire_radius_f, tire_width_f, lat("front", "left", base_front),
-         "left", spec.front_wheel_house_fillet_mm),
+         tire_radius_f, tire_width_f, "left", "front",
+         spec.front_wheel_house_fillet_mm),
         (layout["rear_axle_x"], +spec.track_rear_mm / 2.0,
-         tire_radius_r, tire_width_r, lat("rear", "right", base_rear),
-         "right", spec.rear_wheel_house_fillet_mm),
+         tire_radius_r, tire_width_r, "right", "rear",
+         spec.rear_wheel_house_fillet_mm),
         (layout["rear_axle_x"], -spec.track_rear_mm / 2.0,
-         tire_radius_r, tire_width_r, lat("rear", "left", base_rear),
-         "left", spec.rear_wheel_house_fillet_mm),
+         tire_radius_r, tire_width_r, "left", "rear",
+         spec.rear_wheel_house_fillet_mm),
     ]
-    targets = [t for t in targets if t[5] in sides]
+    targets = [t for t in targets if t[4] in sides]
     out = []
-    for ax, yt, tr, tw, lc, side, fr in targets:
+    for ax, yt, tr, tw, side, axle, fr in targets:
         sign = +1.0 if side == "right" else -1.0
         out.append(WheelhouseSpec(
             axle_x=ax, y_track=yt, side=side,
             tire_radius_mm=tr, tire_width_mm=tw,
             radial_clearance_mm=spec.wheel_house_radial_clearance_mm,
-            lateral_clearance_mm=lc,
+            lateral_clearance_mm=outboard(axle, side),
+            inboard_clearance_mm=inboard(axle, side),
             thickness_mm=spec.wheel_house_thickness_mm,
             fillet_mm=fr,
             ride_height_mm=spec.ride_height_mm,
             floor_edge_y=sign * y_half,
+            base_drop_mm=_base_drop,
         ))
     return out
 
@@ -278,6 +311,7 @@ def build_underbody(spec: Optional[UnderbodySpec] = None):
     wh_faces = []
     for s, solid in wh_solids:
         wh_faces.extend(extract_wheelhouse_surfaces(solid, s, below_cropper))
+
     underbody = cq.Compound.makeCompound([floor, *wh_faces])
 
     if abs(spec.floor_angle_deg) > 1e-6:
@@ -306,7 +340,7 @@ def build_underbody(spec: Optional[UnderbodySpec] = None):
         if side in sides
     ]
 
-    print("[assemble] underbody + 4 wheels ...")
+    print(f"[assemble] underbody + 4 wheels ...")
     asy = cq.Assembly()
     asy.add(underbody, name="underbody", color=cq.Color(0.78, 0.80, 0.84))
     for name, w in wheels:
